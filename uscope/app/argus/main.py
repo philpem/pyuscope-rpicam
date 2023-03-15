@@ -3,15 +3,15 @@
 from uscope.gui.gstwidget import GstVideoPipeline, gstwidget_main
 from uscope.gui.control_scrolls import get_control_scroll
 from uscope.util import add_bool_arg
-from uscope.config import get_usj, cal_load_all, USC, GUI
-from uscope.imager.util import get_scaled
+from uscope.config import get_usj, USC, PC, get_bc
+from uscope.imager.imager_util import get_scaled
 from uscope.benchmark import Benchmark
 from uscope.gui import plugin
 from uscope.gst_util import Gst, CaptureSink
 from uscope.motion.plugins import get_motion_hal
-from uscope.app.argus.threads import MotionThread, PlannerThread, StitcherThread
-from uscope.planner import microscope_to_planner, backlash_move_absolute, PC
-from uscope import util
+from uscope.app.argus.threads import PlannerThread, StitcherThread, MotionThread
+from uscope.planner.planner_util import microscope_to_planner_config
+from uscope.planner.plugins import backlash_move_absolute
 from uscope import config
 from uscope.motion import motion_util
 import json
@@ -409,9 +409,9 @@ class XYPlanner2PWidget(PlannerWidget):
             return
 
         objective = self.get_objective()
-        pconfig = microscope_to_planner(self.ac.usj,
-                                        objective=objective,
-                                        contour=contour_json)
+        pconfig = microscope_to_planner_config(self.ac.usj,
+                                               objective=objective,
+                                               contour=contour_json)
 
         self.ac.update_pconfig(pconfig)
 
@@ -515,8 +515,8 @@ class ScanWidget(AWidget):
             self.stitch_cb.setChecked(False)
             layout.addWidget(self.stitch_cb)
 
-            self.pb = QProgressBar()
-            layout.addWidget(self.pb)
+            self.progress_bar = QProgressBar()
+            layout.addWidget(self.progress_bar)
 
             return layout
 
@@ -546,21 +546,23 @@ class ScanWidget(AWidget):
     def dry(self):
         return self.dry_cb.isChecked()
 
-    def processCncProgress(self, pictures_to_take, pictures_taken, image,
-                           first):
-        #dbg('Processing CNC progress')
-        if first:
-            #self.ac.log('First CB with %d items' % pictures_to_take)
-            self.pb.setMinimum(0)
-            self.pb.setMaximum(pictures_to_take)
-            self.bench = Benchmark(pictures_to_take)
-        else:
+    def processCncProgress(self, state):
+        """
+        pictures_to_take, pictures_taken, image, first
+        """
+        if state["type"] == "begin":
+            self.progress_bar.setMinimum(0)
+            self.progress_bar.setMaximum(state["images_to_capture"])
+            self.progress_bar.setValue(0)
+            self.bench = Benchmark(state["images_to_capture"])
+        elif state["type"] == "image":
             #self.ac.log('took %s at %d / %d' % (image, pictures_taken, pictures_to_take))
-            self.bench.set_cur_items(pictures_taken)
-            self.ac.log('Captured: %s' % (image, ))
+            self.bench.set_cur_items(state["images_captured"])
+            self.ac.log('Captured: %s' % (state["image_filename_rel"], ))
             self.ac.log('%s' % (str(self.bench)))
-
-        self.pb.setValue(pictures_taken)
+            self.progress_bar.setValue(state["images_captured"])
+        else:
+            pass
 
     def plannerDone(self, run_next=True):
         self.ac.log('RX planner done')
@@ -584,7 +586,6 @@ class ScanWidget(AWidget):
             # Return to normal state if HDR was enabled
             self.ac.control_scroll.set_push_gui(True)
             self.ac.control_scroll.set_push_prop(True)
-            self.ac.imager.set_hdr(None)
 
     def run_next_scan_config(self):
         try:
@@ -604,13 +605,8 @@ class ScanWidget(AWidget):
                 self.plannerDone(run_next=False)
                 return
 
-            def emitCncProgress(pictures_to_take, pictures_taken, image,
-                                first):
-                #print 'Emitting CNC progress'
-                if image is None:
-                    image = ''
-                self.ac.cncProgress.emit(pictures_to_take, pictures_taken,
-                                         image, first)
+            def emitCncProgress(state):
+                self.ac.cncProgress.emit(state)
 
             # not sure if this is the right place to add this
             # plannerj['copyright'] = "&copy; %s John McMaster, CC-BY" % datetime.datetime.today().year
@@ -618,7 +614,7 @@ class ScanWidget(AWidget):
             # Directly goes into planner constructor
             # Make sure everything here is thread safe
             # log param is handled by other thread
-            planner_params = {
+            planner_args = {
                 # Simple settings written to disk, no objects
                 "pconfig": pconfig,
                 "motion": self.ac.motion_thread.get_planner_motion(),
@@ -628,9 +624,6 @@ class ScanWidget(AWidget):
                 # Operations must be blocking
                 # We enforce that nothing is running and disable all CNC GUI controls
                 "imager": self.ac.imager,
-
-                # Callback for progress
-                "progress_cb": emitCncProgress,
                 "out_dir": out_dir,
 
                 # Includes microscope.json in the output
@@ -641,10 +634,12 @@ class ScanWidget(AWidget):
                 # Set to true if should try to mimimize hardware actions
                 "dry": dry,
                 # "overwrite": False,
-                "verbosity": 2,
+                #"verbosity": 2,
             }
 
-            self.pt = PlannerThread(planner_params, parent=self)
+            self.pt = PlannerThread(self,
+                                    planner_args,
+                                    progress_cb=emitCncProgress)
             self.pt.log_msg.connect(self.ac.log)
             self.pt.plannerDone.connect(self.plannerDone)
             self.setControlsEnabled(False)
@@ -662,7 +657,6 @@ class ScanWidget(AWidget):
                 # GUI will continue to update to reflect state though
                 self.ac.control_scroll.set_push_gui(False)
                 self.ac.control_scroll.set_push_prop(False)
-                self.ac.imager.set_hdr(hdr)
 
             self.pt.start()
         except:
@@ -1002,9 +996,9 @@ class AdvancedTab(ArgusTab):
         def planner_gb():
             layout = QGridLayout()
             row = 0
-            pconfig = microscope_to_planner(self.ac.usj,
-                                            objective={"x_view": None},
-                                            contour={})
+            pconfig = microscope_to_planner_config(self.ac.usj,
+                                                   objective={"x_view": None},
+                                                   contour={})
             pc = PC(j=pconfig)
 
             layout.addWidget(QLabel("Border"), row, 0)
@@ -1122,7 +1116,7 @@ class StitchingTab(ArgusTab):
 
             layout.addWidget(QLabel("AccessKey"), row, 0)
             # Is there a reasonable default here?
-            self.stitch_accesskey = QLineEdit("")
+            self.stitch_accesskey = QLineEdit(self.ac.bc.)
             layout.addWidget(self.stitch_accesskey, row, 1)
             row += 1
 
@@ -1590,7 +1584,11 @@ However how they are displayed and used is up to end applications
 
 
 class ArgusCommon(QObject):
-    cncProgress = pyqtSignal(int, int, str, int)
+    """
+    was:
+    pictures_to_take, pictures_taken, image, first
+    """
+    cncProgress = pyqtSignal(dict)
     log_msg = pyqtSignal(str)
 
     # pos = pyqtSignal(int)
@@ -1607,6 +1605,7 @@ class ArgusCommon(QObject):
         self.microscope = microscope
         self.usj = get_usj(name=microscope)
         self.usc = USC(usj=self.usj)
+        self.bc = get_bc()
 
         self.scan_configs = None
         self.imager = None
