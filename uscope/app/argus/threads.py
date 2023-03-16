@@ -269,10 +269,10 @@ class PlannerThread(QThread):
         self.planner = None
         self.progress_cb = progress_cb
 
-    def log(self, msg):
+    def log(self, msg=""):
         #print 'emitting log %s' % msg
         #self.log_buff += str(msg) + '\n'
-        self.log_msg.emit(msg)
+        self.log_msg.emit(str(msg))
 
     def setRunning(self, running):
         planner = self.planner
@@ -305,6 +305,10 @@ class PlannerThread(QThread):
             self.planner.register_progress_callback(self.progress_cb)
             self.log('Running planner')
             b = Benchmark()
+            self.log()
+            self.log()
+            self.log()
+            self.log()
             self.planner.run()
             b.stop()
             self.log('Planner done!  Took : %s' % str(b))
