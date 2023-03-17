@@ -760,7 +760,7 @@ class ScanWidget(AWidget):
         self.go_pause_pb.setText("Go")
         # Cleanup camera objects
         self.log_fd = None
-        self.pt = None
+        self.ac.pt = None
 
         self.ac.stitchingTab.scan_completed(self.current_scan_config)
         self.current_scan_config = None
@@ -828,11 +828,11 @@ class ScanWidget(AWidget):
                 #"verbosity": 2,
             }
 
-            self.pt = PlannerThread(self,
-                                    planner_args,
-                                    progress_cb=emitCncProgress)
-            self.pt.log_msg.connect(self.ac.log)
-            self.pt.plannerDone.connect(self.plannerDone)
+            self.ac.pt = PlannerThread(self,
+                                       planner_args,
+                                       progress_cb=emitCncProgress)
+            self.ac.pt.log_msg.connect(self.ac.log)
+            self.ac.pt.plannerDone.connect(self.plannerDone)
             self.setControlsEnabled(False)
             if dry:
                 self.log_fd = StringIO()
@@ -849,7 +849,7 @@ class ScanWidget(AWidget):
                 self.ac.control_scroll.set_push_gui(False)
                 self.ac.control_scroll.set_push_prop(False)
 
-            self.pt.start()
+            self.ac.pt.start()
         except:
             self.plannerDone(run_next=False)
             raise
