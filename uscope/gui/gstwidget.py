@@ -66,19 +66,22 @@ The widget used to render a sinkx winId
 """
 
 
-class SinkxWidget(QWidget):
+class SinkxInnerWidget(QWidget):
     def __init__(self,
                  gst_name=None,
                  config=None,
                  incoming_wh=None,
+                 player=None,
                  parent=None):
         super().__init__(parent=parent)
 
-        policy = QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.setSizePolicy(policy)
-        self.resize(500, 500)
-        print("after resize", self.width(), self.height())
+        if 1:
+            policy = QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self.setSizePolicy(policy)
+            self.resize(150, 150)
+            print("after resize", self.width(), self.height())
 
+        self.player = player
         # The actual QWidget
         self.gst_name = gst_name
         self.config = config
@@ -130,10 +133,6 @@ class SinkxWidget(QWidget):
         print("resized")
     """
 
-    def sizeHint(self):
-        # FIXME: only size hint is being respected
-        return QSize(500, 500)
-
     def setupWidget(self, parent=None):
         if parent:
             self.setParent(parent)
@@ -144,7 +143,7 @@ class SinkxWidget(QWidget):
 # Use QWidget size policy
 # Crop stream if needed to fit size?
 # Unclear what happens if its not a perfect match
-class SinkxZoomableWidget(SinkxWidget):
+class SinkxZoomableWidget(SinkxInnerWidget):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.zoom = 1.0
@@ -156,6 +155,10 @@ class SinkxZoomableWidget(SinkxWidget):
 
     def calc_size(self):
         pass
+
+    def sizeHint(self):
+        # FIXME: only size hint is being respected
+        return QSize(150, 150)
 
     def roi_zoom_plus(self):
         # FIXME: high zoom levels cause crash
@@ -184,10 +187,6 @@ class SinkxZoomableWidget(SinkxWidget):
             self.zoom_out = self.zoom
             self.change_roi_zoom(self.calc_zoom_magnified())
 
-    def resizeEvent(self, event):
-        print("resized")
-        self.update_crop_scale()
-
     def calc_zoom_magnified(self):
         """
         Return the zoom level required to display camera feed at 2x the screen resolution
@@ -209,6 +208,20 @@ class SinkxZoomableWidget(SinkxWidget):
         print("calc_zoom_magnified: settle zoom %0.3f" % zoom)
         return zoom
 
+    def pix_screen_to_incoming_1x(self):
+        """
+        What is the ratio between the camera sensor pixels and the screen size at 1x zoom?
+        Sized such that the feed just fits in the field of view,
+        squashing either width or height as needed
+        """
+        widget_width = self.parent().width()
+        widget_height = self.parent().height()
+        if widget_width / widget_height >= self.incoming_w / self.incoming_h:
+            screen_w_1x = widget_height * self.incoming_w / self.incoming_h
+        else:
+            screen_w_1x = widget_width
+        return self.incoming_w / screen_w_1x
+
     def update_crop_scale(self):
         """
         Set videoscale, videocrop based on current widget size + zoom level
@@ -221,8 +234,8 @@ class SinkxZoomableWidget(SinkxWidget):
         looks like add-borders=true is default => will not change aspect ratio
         lets see how this look
         """
-        widget_width = self.width()
-        widget_height = self.height()
+        widget_width = self.parent().width()
+        widget_height = self.parent().height()
         print("update_crop_scale")
         print(f"  widget {widget_width}w x {widget_height}h")
         print(f"  incoming {self.incoming_w}w x {self.incoming_h}h")
@@ -231,25 +244,37 @@ class SinkxZoomableWidget(SinkxWidget):
             print("WARNING: widget not ready yet for pipeline rescale")
             return
         assert widget_width and widget_height
-        """
-        What would zoom level 1 look like?
-        Is the incoming stream more constrained by width or height?
-        """
-        if widget_width / widget_height >= self.incoming_w / self.incoming_h:
-            screen_w_1x = widget_height * self.incoming_w / self.incoming_h
-            screen_h_1x = widget_height
-        else:
-            screen_w_1x = widget_width
-            screen_h_1x = widget_width * self.incoming_h / self.incoming_w
-        print(f"  Screen: 1x render {screen_w_1x}w x {screen_h_1x}h")
-        pix_screen_to_incoming_1x = self.incoming_w / screen_w_1x
-        """
-        Now figure out the maximum video size supported at this zoom level
-        """
-        incoming_used_w = int(screen_w_1x * pix_screen_to_incoming_1x /
-                              self.zoom)
-        incoming_used_h = int(screen_h_1x * pix_screen_to_incoming_1x /
-                              self.zoom)
+
+        if 0:
+            """
+            What would zoom level 1 look like?
+            Is the incoming stream more constrained by width or height?
+            """
+            if widget_width / widget_height >= self.incoming_w / self.incoming_h:
+                screen_w_1x = widget_height * self.incoming_w / self.incoming_h
+                screen_h_1x = widget_height
+            else:
+                screen_w_1x = widget_width
+                screen_h_1x = widget_width * self.incoming_h / self.incoming_w
+            print(f"  Screen: 1x render {screen_w_1x}w x {screen_h_1x}h")
+
+        pix_screen_to_incoming_1x = self.pix_screen_to_incoming_1x()
+        # Assume everything fits, we will at most take half of each dimension
+        incoming_max_w = int(self.incoming_w / self.zoom)
+        incoming_max_h = int(self.incoming_h / self.zoom)
+        # See what actually fits
+        screen_used_w = min(widget_width,
+                            incoming_max_w / pix_screen_to_incoming_1x)
+        screen_used_h = min(widget_height,
+                            incoming_max_h / pix_screen_to_incoming_1x)
+        # Now convert back to camera space to calculate crop
+        incoming_used_w = screen_used_w * pix_screen_to_incoming_1x
+        incoming_used_h = screen_used_h * pix_screen_to_incoming_1x
+
+        print(f"  Incoming: max_w {incoming_max_w}w x {incoming_max_h}h")
+        print(f"  Screen: used_w {screen_used_w}w x {screen_used_h}h")
+        print(f"  Incoming: used_w {incoming_used_w}w x {incoming_used_h}h")
+
         # Now that we know what can fit,
         # See how much we need to crop off
         # Keep centered => round size down if needed
@@ -274,17 +299,24 @@ class SinkxZoomableWidget(SinkxWidget):
             "top": incoming_crop_tb,
             "bottom": incoming_crop_tb,
         }
-        print("crop", self.crop)
+        print("  crop", self.crop)
 
+        # Resize the inner widget to match what's actually being rendered
+        self.resize(screen_used_w, screen_used_h)
+        # Set to full widget size (as opposed to usable widget area) so that border is added to center view
+        # see caps filter add-borders=true
+        new_caps = "video/x-raw,width=%u,height=%u" % (screen_used_w,
+                                                       screen_used_h)
+        print("  new caps", new_caps)
+        self.capsfilter.props.caps = Gst.Caps(new_caps)
+        # Caps changed => need to re-negotiate
+        self.player.send_event(Gst.Event.new_reconfigure())
+
+        # Only display the pixels we selected
         self.videocrop.set_property("top", self.crop["top"])
         self.videocrop.set_property("bottom", self.crop["bottom"])
         self.videocrop.set_property("left", self.crop["left"])
         self.videocrop.set_property("right", self.crop["right"])
-
-        # Set to full widget size (as opposed to usable widget area) so that border is added to center view
-        # see caps filter add-borders=true
-        self.capsfilter.props.caps = Gst.Caps(
-            "video/x-raw,width=%u,height=%u" % (widget_width, widget_height))
 
     def change_roi_zoom(self, zoom):
         """
@@ -323,6 +355,32 @@ class SinkxZoomableWidget(SinkxWidget):
         assert self.videocrop.link(self.videoscale)
         assert self.videoscale.link(self.capsfilter)
         assert self.capsfilter.link(self.sinkx)
+
+
+"""
+A widget that expands as needed to what we can render
+The inner widget will be resized just large enough to fit the video feed
+This prevents black bars from showing
+"""
+
+
+class SinkxOuterWidget(QWidget):
+    def __init__(self, inner, parent=None):
+        super().__init__(parent=parent)
+        # Originally this class was the rendering widget
+        # However this scheme allows sizing the widget
+        # https://github.com/Labsmore/pyuscope/issues/220
+        self.inner_widget = inner
+        layout = QHBoxLayout()
+        layout.addWidget(self.inner_widget)
+        self.setLayout(layout)
+
+    def resizeEvent(self, event):
+        self.inner_widget.update_crop_scale()
+
+    def sizeHint(self):
+        # FIXME: only size hint is being respected
+        return QSize(200, 200)
 
 
 class GstVideoPipeline:
@@ -393,6 +451,8 @@ class GstVideoPipeline:
                     "type": "overview",
                     "size": "max"
                 }
+        # Needs to be done early so elements can be added before main setup
+        self.player = Gst.Pipeline.new("player")
         """
         key: gst name
         widget: QWidget
@@ -412,8 +472,6 @@ class GstVideoPipeline:
         self.verbose and print("vidpip source %s" % source)
         self.size_widgets()
 
-        # Needs to be done early so elements can be added before main setup
-        self.player = Gst.Pipeline.new("player")
         # Clear if anything bad happens and shouldn't be trusted
         self.ok = True
 
@@ -434,15 +492,20 @@ class GstVideoPipeline:
             gst_name="sinkx_" + widget_name,
             config=dict(widget_config),
             incoming_wh=(self.incoming_w, self.incoming_h),
+            player=self.player,
         )
-        self.widgets[widget_name] = widget
-        return widget
+        outer = SinkxOuterWidget(widget)
+        self.widgets[widget_name] = outer
+        return outer
 
-    def get_widget(self, name):
+    def get_outer_widget(self, name):
         """
         Called by external user to get the widget to render to
         """
         return self.widgets[name]
+
+    def get_inner_widget(self, name):
+        return self.widgets[name].widget
 
     def group_widgets(self):
         """
@@ -476,7 +539,7 @@ class GstVideoPipeline:
         return group_configs
 
     def size_widget(self, widget):
-        if widget.is_fixed():
+        if widget.inner_widget.is_fixed():
             self.size_widgets(widget_in=widget)
 
     def size_widgets(self, widget_in=None):
@@ -500,47 +563,46 @@ class GstVideoPipeline:
             """
             if widget_in and widget_in != widget:
                 continue
-            if not widget.is_fixed():
+            if not widget.inner_widget.is_fixed():
                 continue
-            self.widget.calc_size()
+            self.widget.inner_widget.calc_size()
 
     def setupWidgets(self):
         for widget in self.widgets.values():
-            widget.setupWidget()
+            widget.inner_widget.setupWidget()
 
     def zoomable_plus(self):
-        self.widgets["zoomable"].roi_zoom_plus()
+        self.widgets["zoomable"].inner_widget.roi_zoom_plus()
 
     def zoomable_minus(self):
-        self.widgets["zoomable"].roi_zoom_minus()
+        self.widgets["zoomable"].inner_widget.roi_zoom_minus()
 
     def zoomable_high_toggle(self):
-        self.widgets["zoomable"].zoomable_high_toggle()
+        self.widgets["zoomable"].inner_widget.zoomable_high_toggle()
 
     def change_roi_zoom(self, zoom):
-        self.widgets["zoomable"].change_roi_zoom(zoom)
+        self.widgets["zoomable"].inner_widget.change_roi_zoom(zoom)
 
     def add_full_widget(self):
-        assert 0, "FIXME: full2 widget overhaul"
         """
         Experiment to dynamically add a full screen widget after pipeline is running
         Note this doesn't handle groups / assumes its the only widget on the screen
         """
         widget_config = {"type": "overview", "size": "max"}
         widget = self.create_widget("overview_full_window", widget_config)
-        widget.size_widget()
-        widget.setupWidget()
+        widget.inner_widget.size_widget()
+        widget.inner_widget.setupWidget()
         vc_dsts = []
-        widget.create_elements(self.player, vc_dsts)
+        widget.inner_widget.create_elements(self.player, vc_dsts)
         self.link_tee_dsts(self.tee_vc, vc_dsts, add=False)
-        widget.gst_link()
+        widget.inner_widget.gst_link()
         # Restart pipeline to get winid
         return widget
 
     def full_restart_pipeline(self):
-        wigdata = self.wigdatas["overview_full_window"]
-        wigdata["winid"] = wigdata["widget"].winId()
-        assert wigdata["winid"], "Need widget_winid by run"
+        widget = self.widgets["overview_full_window"]
+        widget.inner_widget.winid = widget.inner_widget.winId()
+        assert widget.inner_widget.winid, "Need widget_winid by run"
 
         self.player.set_state(Gst.State.PAUSED)
         self.player.set_state(Gst.State.PLAYING)
@@ -708,7 +770,7 @@ class GstVideoPipeline:
 
         our_vc_tees = []
         for widget in self.widgets.values():
-            widget.create_elements(self.player, our_vc_tees)
+            widget.inner_widget.create_elements(self.player, our_vc_tees)
 
         # Note at least one vc tee is garaunteed (either full or roi)
         self.verbose and print("Link raw...")
@@ -723,7 +785,7 @@ class GstVideoPipeline:
 
         # Finish linking post vc_tee
         for widget in self.widgets.values():
-            widget.gst_link()
+            widget.inner_widget.gst_link()
 
         bus = self.player.get_bus()
         bus.add_signal_watch()
@@ -736,8 +798,9 @@ class GstVideoPipeline:
         You must have placed widget by now or it will invalidate winid
         """
         for widget in self.widgets.values():
-            widget.winid = widget.winId()
-            assert widget.winid, "Need widget_winid by run"
+            # Render to the perfectly sized inner widget
+            widget.inner_widget.winid = widget.inner_widget.winId()
+            assert widget.inner_widget.winid, "Need widget_winid by run"
 
         self.verbose and print("Starting gstreamer pipeline")
         self.player.set_state(Gst.State.PLAYING)
@@ -762,8 +825,8 @@ class GstVideoPipeline:
 
     def gstreamer_to_winid(self, want_name):
         for widget in self.widgets.values():
-            if widget.gst_name == want_name:
-                return widget.winid
+            if widget.inner_widget.gst_name == want_name:
+                return widget.inner_widget.winid
         assert 0, "Failed to match widget winid for ximagesink %s" % want_name
 
     def on_sync_message(self, bus, message):

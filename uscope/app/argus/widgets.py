@@ -152,6 +152,7 @@ class ObjectiveWidget(AWidget):
 
         self.obj_cb.currentIndexChanged.connect(self.update_obj_config)
         self.obj_cb.setCurrentIndex(self.default_objective_index)
+        self.update_obj_config()
 
     def update_obj_config(self):
         '''Make resolution display reflect current objective'''
@@ -183,10 +184,11 @@ class ObjectiveWidget(AWidget):
 
     def cache_load(self, cachej):
         j = cachej.get("objective", {})
+        index = j.get("index", 0)
         try:
-            self.default_objective_index = int(j.get("index", 0))
+            self.default_objective_index = int(index)
         except Exception:
-            print("WARNING: invalid objective index")
+            print(f"WARNING: invalid objective index: {index}")
 
 
 """
@@ -308,38 +310,6 @@ class SnapshotWidget(AWidget):
 """
 Provides camera overview and ROI side by side
 """
-
-
-class FullROIWidget(AWidget):
-    def __init__(self, ac, parent=None):
-        super().__init__(ac=ac, parent=parent)
-
-    def initUI(self):
-        # Overview
-        def low_res_layout():
-            layout = QVBoxLayout()
-            if "overview" in self.ac.vidpip.wigdatas:
-                layout.addWidget(QLabel("Overview"))
-                layout.addWidget(self.ac.vidpip.get_widget("overview"))
-
-            return layout
-
-        # Higher res in the center for focusing
-        def high_res_layout():
-            layout = QVBoxLayout()
-            if "overview_roi" in self.ac.vidpip.wigdatas:
-                layout.addWidget(QLabel("Focus"))
-                layout.addWidget(self.ac.vidpip.get_widget("overview_roi"))
-
-            return layout
-
-        layout = QHBoxLayout()
-        layout.addLayout(low_res_layout())
-        layout.addLayout(high_res_layout())
-        self.setLayout(layout)
-
-    def post_ui_init(self):
-        pass
 
 
 class PlannerWidget(AWidget):
@@ -1217,7 +1187,7 @@ class MainTab(ArgusTab):
         self.add_awidget("snapshot", self.snapshot_widget)
         self.objective_widget = ObjectiveWidget(ac=ac)
         self.add_awidget("objective", self.objective_widget)
-        self.video_widget = self.ac.vidpip.get_widget("zoomable")
+        self.video_widget = self.ac.vidpip.get_outer_widget("zoomable")
         self.video_widget.setParent(self)
         if 1:
             policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1377,7 +1347,7 @@ class ImagerTab(ArgusTab):
         if "overview2" in self.ac.vidpip.widgets:
             # screws up the original
             layout2 = QHBoxLayout()
-            layout2.addWidget(self.ac.vidpip.get_widget("overview2"))
+            layout2.addWidget(self.ac.vidpip.get_outer_widget("overview2"))
             self.layout.addLayout(layout2)
 
         def hdr_gb():
