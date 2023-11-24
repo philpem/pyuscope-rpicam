@@ -552,6 +552,9 @@ class GstVideoPipeline:
         if is_v4l2:
             self.source = Gst.ElementFactory.make('v4l2src', None)
             assert self.source is not None
+        elif self.source_name == 'gst-libcamerasrc':
+            self.source = Gst.ElementFactory.make('libcamerasrc', None)
+            assert self.source is not None
         elif self.source_name == 'gst-toupcamsrc':
             self.source = Gst.ElementFactory.make('toupcamsrc', None)
             assert self.source is not None, "Failed to load toupcamsrc. Is it in the path?"

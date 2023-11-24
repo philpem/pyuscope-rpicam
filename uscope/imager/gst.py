@@ -114,7 +114,10 @@ class GstCLIImager(Imager):
         # Must not be initialized until after layout is set
         # print(source)
         # assert 0
-        if self.source_name in ("v4l2src", "v4l2src-mu800"):
+        if self.source_name in ("libcamerasrc"):
+            self.source = Gst.ElementFactory.make('libcamerasrc', None)
+            assert self.source is not None
+        elif self.source_name in ("v4l2src", "v4l2src-mu800"):
             self.source = Gst.ElementFactory.make('v4l2src', None)
             assert self.source is not None
             device = source_opts.get("v4l2src",
@@ -262,7 +265,7 @@ def gst_add_args(parser):
     parser.add_argument("--v4l2src-device", default=None, help="video device")
     parser.add_argument("--gst-source",
                         default="videotestsrc",
-                        help="videotestsrc, v4l2src, toupcamsrc")
+                        help="videotestsrc, v4l2src, toupcamsrc, libcamerasrc")
     parser.add_argument("--gst-crop", default="", help="top,bottom,left,right")
 
 

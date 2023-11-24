@@ -1,0 +1,33 @@
+/*
+A minimal configuration to do basic testing
+*/
+{
+    "motion": {
+        "hal": "grbl-ser",
+        "grbl": {
+            "port": "/dev/ttyUSB0",
+        },
+    },
+    "imager": {
+        "source":"gst-libcamerasrc",
+        "width": 1920,
+        "height": 1080,
+    },
+    "optics": {
+        // In the ballpark of a typical value
+        "um_per_pixel_raw_1x": 5.0,
+    },
+    "systems": [
+        //Default configuration
+        {
+            "camera_sn": null,
+            "objectives_db": [
+                "vendor: Olympus, model: NeoDPlan 5X",
+                "vendor: Olympus, model: NeoDPlan 10X",
+                "vendor: Olympus, model: NeoSPlan 20X",
+                "vendor: Olympus, model: NeoDPlan 50X",
+                "vendor: Olympus, model: NeoSPlan 10X",
+            ],
+        },
+    ],
+}
