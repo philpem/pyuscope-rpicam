@@ -25,6 +25,12 @@ class DummyGstControlScroll(GstControlScroll):
                                   ac=ac,
                                   parent=parent)
 
+    def auto_exposure_enabled(self):
+        return True
+    
+    def auto_color_enabled(self):
+        return True
+
 
 def get_control_scroll(vidpip, ac):
     # Need to hide this when not needed
