@@ -155,8 +155,6 @@ class Picam2GUIImager(Imager):
         #self.factor = self.usc.imager.scalar()
         #self.videoflip_method = self.usc.imager.videoflip_method()
 
-        # Create capture configuration: grab the whole image, don't display it
-        self.capture_config = self.ac.capture_pc2.create_still_configuration(raw={}, display=None)
 
     def get_sn(self):
         # Picamera2 has no serial number
@@ -167,16 +165,19 @@ class Picam2GUIImager(Imager):
 
     def next_image(self):
         def got_image(job):
-            self.image_data = self.picam2.wait(job)
+            self.image_req = self.ac.capture_pc2.wait(job)
             self.image_ready.set()
 
         self.image_ready.clear()
-        self.ac.capture_pc2.switch_mode_capture_request_and_stop(self.capture_config, signal_function=got_image)
+        capture_config = self.ac.capture_pc2.create_still_configuration(display=None)
+        self.ac.capture_pc2.switch_mode_and_capture_request(capture_config, signal_function=got_image)
 
         self.ac.emit_log('Waiting for next image...')
         self.image_ready.wait()
         self.ac.emit_log('Got image')
-        return self.image_data.make_image()
+        image = self.image_req.make_image("main")
+        del self.image_req
+        return image
 
     def get(self):
         # 2023-11-16: we used to do scaling / etc here
@@ -260,8 +261,8 @@ def get_gui_imager(source, gui):
     elif source == "picam2src":
         ret = Picam2GUIImager(gui, usc=gui.usc)
         # For HDR which needs in situ control
-        #ret.emitter.change_properties.connect(
-        #    gui.control_scroll.set_disp_properties)
+        ret.emitter.change_properties.connect(
+            gui.control_scroll.set_disp_properties)
         return ret
     else:
         raise Exception('Invalid imager type %s' % source)

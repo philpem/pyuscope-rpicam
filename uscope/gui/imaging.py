@@ -1605,11 +1605,23 @@ class ImagingTaskWidget(AWidget):
         # Disable until snapshot is completed
         self.snapshot_pb.setEnabled(False)
 
-        def emitSnapshotCaptured(image_id):
-            self.ac.log('Image captured: %s' % image_id)
-            self.snapshotCaptured.emit(image_id)
-
-        self.ac.capture_sink.request_image(emitSnapshotCaptured)
+        if hasattr(self.ac, 'capture_sink'):
+            # Gstreamer implementation
+            def emitSnapshotCaptured(image_id):
+                self.ac.log('Image captured: %s' % image_id)
+                self.snapshotCaptured.emit(image_id)
+            self.ac.capture_sink.request_image(emitSnapshotCaptured)
+        elif hasattr(self.ac, 'capture_pc2'):
+            # Picamera2 implementation
+            def got_image(job):
+                self.ac.log('Image captured')
+                self.pc2_request = self.ac.capture_pc2.wait(job)
+                self.snapshotCaptured.emit(None)
+            capture_config = self.ac.capture_pc2.create_still_configuration(display=None)
+            self.ac.capture_pc2.switch_mode_and_capture_request(capture_config, signal_function=got_image)
+            pass
+        else:
+            self.ac.log("ERROR: Unknown imaging implementation")
 
     def save_extension(self):
         # ex: .jpg, .tif
@@ -1627,7 +1639,14 @@ class ImagingTaskWidget(AWidget):
     def captureSnapshot(self, image_id):
         self.ac.log('RX image for saving')
 
-        image = self.ac.capture_sink.pop_image(image_id)
+        if hasattr(self.ac, 'capture_sink'):
+            # Gstreamer implementation
+            image = self.ac.capture_sink.pop_image(image_id)
+        elif hasattr(self.ac, 'capture_pc2'):
+            # Picamera2 implementation. "image_id" is not used
+            image = self.pc2_request.make_image("main")
+            del self.pc2_request
+
         """
         # FIXME: should unify this with Imager better
         # For now assertion guards help make sure pipeline is correct
