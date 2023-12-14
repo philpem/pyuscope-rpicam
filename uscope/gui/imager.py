@@ -140,6 +140,112 @@ class GstGUIImager(Imager):
         return self.ac.control_scroll.get_disp_properties()
 
 
+class Picam2GUIImager(Imager):
+    class Emitter(QObject):
+        change_properties = pyqtSignal(dict)
+
+    def __init__(self, ac, usc):
+        Imager.__init__(self)
+        self.ac = ac
+        self.usc = usc
+        self.image_ready = threading.Event()
+        self.image_id = None
+        self.emitter = Picam2GUIImager.Emitter()
+        self.width, self.height = self.usc.imager.final_wh()
+        #self.factor = self.usc.imager.scalar()
+        #self.videoflip_method = self.usc.imager.videoflip_method()
+
+        # Create capture configuration: grab the whole image, don't display it
+        self.capture_config = self.ac.capture_pc2.create_still_configuration(raw={}, display=None)
+
+    def get_sn(self):
+        # Picamera2 has no serial number
+        return None
+
+    def wh(self):
+        return self.width, self.height
+
+    def next_image(self):
+        def got_image(job):
+            self.image_data = self.picam2.wait(job)
+            self.image_ready.set()
+
+        self.image_ready.clear()
+        self.ac.capture_pc2.switch_mode_capture_request_and_stop(self.capture_config, signal_function=got_image)
+
+        self.ac.emit_log('Waiting for next image...')
+        self.image_ready.wait()
+        self.ac.emit_log('Got image')
+        return self.image_data.make_image()
+
+    def get(self):
+        # 2023-11-16: we used to do scaling / etc here
+        # Now its done in image processing thread
+        # This also allows getting "raw" image if needed
+        return {"0": self.next_image()}
+
+    # FIXME: clean this up
+    # maybe start by getting all parties to call this
+    # then can move things into main get function?
+    def get_processed(self, timeout=3.0):
+        with LogTimer("get_processed: net",
+                      variable="PYUSCOPE_PROFILE_TIMAGE"):
+            # Get relatively unprocessed snapshot
+            with LogTimer("get_processed: raw",
+                          variable="PYUSCOPE_PROFILE_TIMAGE"):
+                image = self.get()["0"]
+
+            processed = {}
+            ready = threading.Event()
+
+            def callback(command, args, ret_e):
+                if type(ret_e) is Exception:
+                    processed["exception"] = ret_e
+                else:
+                    processed["image"] = ret_e
+                ready.set()
+
+            options = {}
+            options["image"] = image
+            options["scale_factor"] = self.ac.usc.imager.scalar()
+            options["scale_expected_wh"] = self.ac.usc.imager.final_wh()
+            if self.ac.usc.imager.videoflip_method():
+                options[
+                    "videoflip_method"] = self.ac.usc.imager.videoflip_method(
+                    )
+
+            self.ac.image_processing_thread.process_image(options=options,
+                                                          callback=callback)
+            with LogTimer("get_processed: waiting",
+                          variable="PYUSCOPE_PROFILE_TIMAGE"):
+                ready.wait(timeout)
+            if "exception" in processed:
+                raise Exception(
+                    f"failed to process image: {processed['exception']}")
+            return processed["image"]
+
+    def log_planner_header(self, log):
+        log("Imager config")
+        log("  Image size")
+        log("    Raw sensor size: %uw x %uh" % (self.usc.imager.raw_wh()))
+        cropw, croph = self.usc.imager.cropped_wh()
+        log("    Cropped sensor size: %uw x %uh" %
+            (self.usc.imager.cropped_wh()))
+        scalar = self.usc.imager.scalar()
+        log("    Output scale factor: %0.1f" % scalar)
+        log("    Final scaled image: %uw x %uh" %
+            (cropw * scalar, croph * scalar))
+
+    # FIXME: should maybe actually use low level properties
+    # Start with this as PoC since its safer for GUI updates though
+
+    def _set_properties(self, vals):
+        self.ac.control_scroll.set_disp_properties(vals)
+
+    def _get_properties(self):
+        return self.ac.control_scroll.get_disp_properties()
+
+
 def get_gui_imager(source, gui):
     # WARNING: only gst- sources are supported
     # This indirection may be eliminated
@@ -150,6 +256,12 @@ def get_gui_imager(source, gui):
         # For HDR which needs in situ control
         ret.emitter.change_properties.connect(
             gui.control_scroll.set_disp_properties)
+        return ret
+    elif source == "picam2src":
+        ret = Picam2GUIImager(gui, usc=gui.usc)
+        # For HDR which needs in situ control
+        #ret.emitter.change_properties.connect(
+        #    gui.control_scroll.set_disp_properties)
         return ret
     else:
         raise Exception('Invalid imager type %s' % source)
