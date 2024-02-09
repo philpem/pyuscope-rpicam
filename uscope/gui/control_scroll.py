@@ -771,7 +771,7 @@ class Picam2ControlScroll(ImagerControlScroll):
                     #"min": picam2.camera_controls['ExposureTime'][0],
                     #"max": picam2.camera_controls['ExposureTime'][1],
                     #"default": picam2.camera_controls['ExposureTime'][2],
-                    "min": 0,
+                    "min": 60,
                     "max": 60000,
                     "default": 45000,
 
@@ -780,9 +780,9 @@ class Picam2ControlScroll(ImagerControlScroll):
                 {
                     "prop_name": "AnalogueGain",
                     "disp_name": "Analog gain (x10)",
-                    # FIXME: The min/max changes depending on the mode the camera is in, TODO deal with this (somehow)
-                    "min":      int(picam2.camera_controls['AnalogueGain'][0] * 10.0),
-                    "max":      int(picam2.camera_controls['AnalogueGain'][1] * 10.0),
+                    # FIXME: The min/max changes depending on the mode the camera is in, TODO deal with this (somehow). For now, min 1x, max 32x.
+                    "min":      10,  # int(picam2.camera_controls['AnalogueGain'][0] * 10.0),
+                    "max":      320, # int(picam2.camera_controls['AnalogueGain'][1] * 10.0),
                     "default":  10,
                     "gui_driven": False,
                 },
@@ -886,6 +886,15 @@ class Picam2ControlScroll(ImagerControlScroll):
 
         # Push the new camera controls to Picamera2
         self.picam2.set_controls(self._camera_controls)
+        
+        # Auto-exposure fights with GUI: disable manual exposure controls if it's on
+        if name == "AeEnable":
+            self.set_gui_driven(not val,
+                                disp_names=["Exposure time", "Analog gain (x10)"])
+
+        # Auto-white-balance fights with GUI: disable manual colour controls if it's on
+        if name == "AwbEnable":
+            self.set_gui_driven(not val, disp_names=["Red gain (x10)", "Blue gain (x10)", "Colour temperature"])
 
     # TODO FIXME: ColourGains and AnalogueGain are floats, should be scaled by 10x and converted to/from int when passed to/from the GUI
     def _raw_prop_read(self, name):
@@ -954,15 +963,6 @@ class Picam2ControlScroll(ImagerControlScroll):
         self.log("> get_exposure_disp_property")
         return "ExposureTime"
 
-    def disp_prop_was_rw(self, name, value):
-        self.log(f"> disp_prop_was_rw {name} => {value}")
-        # Auto-exposure quickly fights with GUI
-        # Disable the control when its activated
-        if name == "AeEnable":
-            self.set_gui_driven(not value,
-                                disp_names=["ExposureTime"])
-        if name == "AwbEnable":
-            self.set_gui_driven(not value, disp_names=["ColourGains_R", "AnalogueGain", "ColourGains_B"])
 
     # FIXME: There's a bit of gstreamer cruft below here which needs tidying up
 
@@ -988,6 +988,6 @@ class Picam2ControlScroll(ImagerControlScroll):
                 val = self.template_property(propk)
                 propdict[val["prop_name"]] = val
             groups[group_name] = propdict
-        from pprint import pprint; print("Flattened group list:"); pprint(groups, indent=2)
-        #import sys; sys.exit(1)
+        # from pprint import pprint; print("Flattened group list:"); pprint(groups, indent=2)
+        # import sys; sys.exit(1)
         return groups
