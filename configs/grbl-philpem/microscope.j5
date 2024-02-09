@@ -8,16 +8,16 @@ A minimal configuration to do basic testing
             "port": "/dev/ttyUSB0",
         },
         "backlash": {
-            # X has a square coupler with lots of lovely backlash
+            // X has a square coupler with lots of lovely backlash
             "x": 0.040,
             
-            # Y has a spline coupler with less backlash
+            // Y has a spline coupler with less backlash
             "y": 0.024,
 
-            # Z is direct drive - TODO, work out the backlash in the BH2
+            // Z is direct drive - TODO, work out the backlash in the BH2
             "z": 0.000,
         },
-        # I think this enables backlash compensation; it's either -1 or null.
+        // I think this enables backlash compensation; it's either -1 or null.
         "backlash_compensation": -1,
     },
     "imager": {
