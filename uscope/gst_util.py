@@ -141,16 +141,6 @@ class CaptureSink(CbSink):
             rgba = cv2.cvtColor(yuv, cv2.COLOR_YUV2RGBA_YUYV)
             rgb = cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB)
             return Image.fromarray(rgb)
-        elif source_type.find("gst-libcamerasrc") == 0:
-            open("tmp.bin", "wb").write(buf)    # REMOVEME DEBUG CODE
-            w = width
-            h = height
-            shape = (h, w, 2)
-            yuv = np.frombuffer(buf, dtype=np.uint8)
-            yuv = yuv.reshape(shape)
-            rgba = cv2.cvtColor(yuv, cv2.COLOR_YUV2RGBA_YUYV)
-            rgb = cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB)
-            return Image.fromarray(rgb)
         elif source_type.find("gst-videotestsrc") == 0:
             w = width
             h = height
