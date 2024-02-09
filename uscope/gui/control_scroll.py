@@ -679,3 +679,164 @@ class GstControlScroll(ImagerControlScroll):
         ps = self.vidpip.source.find_property(name)
         return ps.default_value
     """
+
+class Picam2ControlScroll(ImagerControlScroll):
+    """
+    Display a number of picam2 controls and supply knobs to tweak them
+    """
+
+    def __init__(self, picam2, ac, parent=None):
+        groups = OrderedDict([
+            ("HSV+", [
+                {
+                    "prop_name": "AeEnable",
+                    "disp_name": "Auto exposure",
+                    "type": "bool"
+                },
+                {
+                    "prop_name": "AwbEnable",
+                    "disp_name": "Auto white balance",
+                    "type": "bool"
+                },
+            ]),
+        ])
+
+        """
+                {
+                    "prop_name": "ColourGains_R",
+                    "disp_name": "Red",
+                    "min": 0,
+                    "max": 320
+                },
+                {
+                    "prop_name": "AnalogueGain",
+                    "disp_name": "Green",
+                    "min": picam2.camera_controls['AnalogueGain'][0],
+                    "max": picam2.camera_controls['AnalogueGain'][1],
+                    "default": picam2.camera_controls['AnalogueGain'][2],
+                },
+                {
+                    "prop_name": "ColourGains_B",
+                    "disp_name": "Blue",
+                    "min": 0,
+                    "max": 320,
+                },
+                {
+                    "prop_name": "ExposureTime",
+                    "disp_name": "Exp",
+                    "min": picam2.camera_controls['ExposureTime'][0],
+                    "max": picam2.camera_controls['ExposureTime'][1],
+                    "default": picam2.camera_controls['ExposureTime'][2],
+                },
+            ]),
+        ])
+        """
+
+        ImagerControlScroll.__init__(self,
+                                    groups=self.flatten_groups(groups),
+                                    ac=ac,
+                                    parent=parent)
+        self.picam2 = picam2
+        self.log = ac.log
+        self.metadata = None
+        
+        # Force some defaults in
+        from libcamera import controls
+        self.picam2.set_controls({
+            "AwbMode": controls.AwbModeEnum.Tungsten
+        })
+
+        layout = QVBoxLayout()
+        layout.addLayout(self.buttonLayout())
+
+    def raw_prop_write(self, name, val):
+        self.log(f"RawPropWrite {name} => {val}")
+        self.picam2.set_controls({name: val})
+        pass
+
+    def raw_prop_read(self, name):
+        # Trying to read the camera metadata is a blocking operation.
+        #self.log(f"RawPropRead '{name}'")
+        return 0
+        """
+        if self.metadata is None:
+            # capture_metadata contains most of the settings
+            metadata = self.picam2.capture_metadata()
+            self.metadata = metadata
+        else:
+            metadata = self.metadata
+        """
+
+        #val = self.metadata.get(name, None)
+        #self.log(f"Metadata read '{name}' gets {val}")
+        return 0
+
+        # Colour gains for R and G are stored in a tuple and need to be handled differently
+        if name == 'ColourGains_R':
+            return metadata['ColourGains'][0]
+        if name == 'ColourGains_B':
+            return metadata['ColourGains'][1]
+        else:
+            return metadata[name]
+
+    """
+    def raw_prop_default(self, name):
+        ps = self.vidpip.source.find_property(name)
+        return ps.default_value
+    """
+
+    def auto_exposure_enabled(self):
+        #return bool(self.disp_prop_read("AeEnable"))
+        return True
+
+    def auto_color_enabled(self):
+        #return bool(self.disp_prop_read("AwbEnable"))
+        return True
+
+    def set_exposure(self, n):
+        #self.prop_write("ExposureTime", n)
+        pass
+
+    def get_exposure(self):
+        #return self.disp_prop_read("ExposureTime")
+        return 0
+
+    def get_exposure_disp_property(self):
+        return "ExposureTime"
+
+    def disp_prop_was_rw(self, name, value):
+        # print("disp prop rw", name, value)
+        # Auto-exposure quickly fights with GUI
+        # Disable the control when its activated
+        if name == "AeEnable":
+            self.set_gui_driven(not value,
+                                disp_names=["ExposureTime"])
+        if name == "AwbEnable":
+            self.set_gui_driven(not value, disp_names=["ColourGains_R", "AnalogueGain", "ColourGains_B"])
+
+
+    def template_property(self, prop_entry):
+        prop_name = prop_entry["prop_name"]
+
+        ret = {}
+        # self.raw_prop_read(prop_name)
+        ret["default"] = None
+        ret["type"] = "int"
+
+        ret.update(prop_entry)
+        return ret
+
+    def flatten_groups(self, groups_gst):
+        """
+        Convert a high level gst property description to something usable by widget API
+        """
+        groups = OrderedDict()
+        for group_name, gst_properties in groups_gst.items():
+            propdict = OrderedDict()
+            for propk in gst_properties:
+                val = self.template_property(propk)
+                propdict[val["prop_name"]] = val
+            groups[group_name] = propdict
+        print("groups", groups)
+        # import sys; sys.exit(1)
+        return groups

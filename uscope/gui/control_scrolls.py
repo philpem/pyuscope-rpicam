@@ -1,4 +1,4 @@
-from uscope.gui.control_scroll import MockControlScroll, GstControlScroll
+from uscope.gui.control_scroll import MockControlScroll, GstControlScroll, Picam2ControlScroll
 from uscope.imager.plugins.gst_toupcamsrc.widgets import TTControlScroll
 from uscope.imager.plugins.gst_libcamerasrc.widgets import LibcameraGstControlScroll
 from uscope.imager.plugins.gst_v4l2src.widgets import V4L2GstControlScroll
@@ -50,6 +50,8 @@ def get_control_scroll(vidpip, ac):
         return V4L2HY800BControlScroll(vidpip, ac=ac)
     elif vidpip.source_name == "gst-v4l2src-yw500u3M":
         return V4L2YW500U3MControlScroll(vidpip, ac=ac)
+    elif vidpip.source_name == "picam2src":
+        return Picam2ControlScroll(ac.capture_pc2, ac=ac)
     else:
         # vidpip.log eats this message
         print("WARNING: no control layout for source %s" %
