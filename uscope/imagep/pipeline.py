@@ -18,7 +18,7 @@ from uscope.imagep.util import EtherealImageR, EtherealImageW
 from uscope.imagep.streams import StreamCSIP, DirCSIP, SnapshotCSIP
 from uscope.imagep.plugins import get_plugins, get_plugin_ctors
 from uscope import config
-from uscope.microscope import get_stitcher_microscope
+from uscope.microscope import get_virtual_microscope, get_mconfig
 
 import os
 import glob
@@ -64,7 +64,7 @@ class CSImageProcessorThread(threading.Thread):
         self.simple_idle = threading.Event()
         self.simple_idle.set()
         self.queue_in = queue.Queue()
-        self.queue_out = queue.Queue()
+        # self.queue_out = queue.Queue()
 
         # Each thrread gets its own set of correction engines
         self.plugins = get_plugins(log=self.log,
@@ -98,7 +98,7 @@ class CSImageProcessorThread(threading.Thread):
 
             def finish_command(result, info):
                 out = (ip_params, result, info)
-                self.queue_out.put(out)
+                # self.queue_out.put(out)
                 if ip_params.tb:
                     ip_params.tb.callback()
                 if ip_params.callback:
@@ -182,7 +182,7 @@ class CSImageProcessor(threading.Thread):
 
         self.log = log
         self.queue_in = queue.Queue()
-        self.queue_out = queue.Queue()
+        # self.queue_out = queue.Queue()
         self.running = threading.Event()
         self.ready = threading.Event()
         self.workers = OrderedDict()
@@ -199,9 +199,13 @@ class CSImageProcessor(threading.Thread):
         self.running.set()
 
     def __del__(self):
-        self.stop()
+        self.shutdown()
 
-    def stop(self):
+    def shutdown(self):
+        self.shutdown_request()
+        self.shutdown_join()
+
+    def shutdown_request(self):
         self.running.clear()
 
         if self.workers:
@@ -209,11 +213,13 @@ class CSImageProcessor(threading.Thread):
             for worker in self.workers.values():
                 worker.stop()
             self.log("Shutting down: joining")
-            for worker in self.workers.values():
-                worker.join()
-            self.workers = None
-            self.log("Joined")
 
+    def shutdown_join(self, timeout=3.0):
+        for worker in self.workers.values():
+            worker.join(timeout=timeout)
+        self.log("Joined")
+
+        # Now that threads are destroyed get rid of temp files
         if self.temp_dir_object:
             # shutil.rmtree(self.temp_dir)
             self.temp_dir_object.cleanup()
@@ -443,7 +449,7 @@ def process_dir(directory,
         else:
             microscope_name_from_scan_dir(directory, mconfig)
 
-        microscope = get_stitcher_microscope(mconfig=mconfig)
+        microscope = get_virtual_microscope(mconfig=mconfig)
 
     ip = None
     try:
@@ -453,7 +459,7 @@ def process_dir(directory,
         ip.process_dir(directory, *args, **kwargs)
     finally:
         if ip:
-            ip.stop()
+            ip.shutdown()
     del ip
 
 
@@ -464,7 +470,7 @@ def process_snapshots(images,
                       mconfig=None,
                       **kwargs):
     if microscope is None:
-        microscope = get_stitcher_microscope(mconfig=mconfig)
+        microscope = get_virtual_microscope(mconfig=mconfig)
 
     ip = None
     try:

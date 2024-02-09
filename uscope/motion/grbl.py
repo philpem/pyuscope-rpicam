@@ -9,6 +9,7 @@ from uscope.motion.hal import MotionHAL, MotionCritical
 from uscope import util
 from uscope.motion.motion_util import parse_move
 from uscope.util import tobytes, tostr
+from uscope.config import get_bc
 
 import termios
 import serial
@@ -230,6 +231,35 @@ class GrblError(Exception):
         super().__init__(new_msg)
 
 
+def reformat_config(s):
+    """
+    "$0=10 (step pulse,usec)",
+    to
+    ("$0=10", "step pulse,usec")
+    """
+    s = s.strip()
+    if "(" in s:
+        config, comment = s.split("(")
+        comment = comment.replace(")", "").strip()
+        config = config.strip()
+        return config, comment
+    else:
+        return s, None
+
+
+def print_config(s, prefix="", log=print):
+    config, comment = reformat_config(s)
+    if comment:
+        log(f'{prefix}"{config}", //{comment}')
+    else:
+        log(f'{prefix}"{config}",')
+
+
+def print_configs(l, log=print):
+    for s in l:
+        print_config(s, prefix="", log=log)
+
+
 class GRBLSer:
     def __init__(
         self,
@@ -245,7 +275,7 @@ class GRBLSer:
         self.verbose = verbose if verbose is not None else bool(
             int(os.getenv("GRBLSER_VERBOSE", "0")))
         # For debugging concurrency issue
-        self.poison_threads = False
+        self.check_threads = get_bc().dev_mode()
         self.last_thread = None
         self.ser_timeout = ser_timeout
 
@@ -327,16 +357,20 @@ class GRBLSer:
         finally:
             self.serial.timeout = timeout
 
+    def update_check_thread(self):
+        self.last_thread = threading.get_ident()
+        if self.check_threads:
+            print("grbl thread updated: %s" % threading.get_ident())
+
     def tx(self, out, nl=True):
         self.verbose and print("tx '%s'" % (out, ))
 
-        if self.poison_threads:
+        if self.check_threads:
             if self.last_thread:
                 assert self.last_thread == threading.get_ident(), (
                     self.last_thread, threading.get_ident())
             else:
-                self.last_thread = threading.get_ident()
-            print("grbl thread: %s" % threading.get_ident())
+                self.update_check_thread()
 
         if nl:
             out = out + '\r'
@@ -647,7 +681,7 @@ class MockGRBLSer(GRBLSer):
         self.verbose and print("MOCK: opening", port)
         self.ser_timeout = -1
         self.serial = None
-        self.poison_threads = False
+        self.check_threads = get_bc().dev_mode()
         self.reset()
 
     def in_reset(self):
@@ -1220,6 +1254,35 @@ class GRBL:
         for axis, value in axes.items():
             self.gs.txrxs("$%s=%0.3f" % (axis2reg[axis], value))
 
+    def log_info(self, log=print):
+        log("GRBL info")
+        try:
+            info = grbl_read_meta(self.gs)
+            log("  Comment: %s" % (info["comment"], ))
+            log("  S/N: %s" % (info["sn"], ))
+            log("  Config: %s" % (info["config"].hex(), ))
+        except NoGRBLMeta:
+            log("  Config magic number not found")
+
+        # Can take up to two times to pop all status info
+        # Third print is stable
+        for i in range(3):
+            log("")
+            log("? (%u / %u)" % (i + 1, 3))
+            log(self.gs.question())
+        log("")
+        log("i")
+        print_configs(self.gs.i(), log=log)
+        log("")
+        log("g")
+        print_config(self.gs.g(), log=log)
+        log("")
+        log("$")
+        print_configs(self.gs.dollar(), log=log)
+        log("")
+        log("#")
+        print_configs(self.gs.hash(), log=log)
+
 
 """
 Coordinate system convention
@@ -1251,6 +1314,10 @@ class GrblHal(MotionHAL):
         if microscope_name:
             self.validate_microscope_model(microscope_name)
         """
+
+    def update_check_thread(self):
+        self.grbl.gs.update_check_thread()
+        super().update_check_thread()
 
     def _wcs_offsets(self):
         """
@@ -1289,9 +1356,14 @@ class GrblHal(MotionHAL):
         if rc is not None:
             self.rc_commands(rc)
 
+        # Cache so that damper can be adjusted later
+        self._abs_max_velocities = self._get_max_velocities()
+        self._abs_max_accelerations = self._get_max_accelerations()
+        """
         damper = self.microscope.usc.motion.damper()
         if damper is not None:
-            self.apply_damper(damper)
+            self.apply_damper_early(damper)
+        """
 
         # Used to be in ScalarMM but moved here
         # Too much nuance / tied ot GRBL specific things
@@ -1344,6 +1416,13 @@ class GrblHal(MotionHAL):
                 self.microscope.usc.motion.format_positions(
                     self._wcs_offsets_cache))
 
+    def reconfigure(self):
+        """
+        Call to re-calculate constants at runtime
+        Call if you change some calibration constants
+        """
+        self.cache_constants()
+
     def _get_steps_per_mm(self):
         """
         Figure out the smallest possible machine delta
@@ -1376,10 +1455,20 @@ class GrblHal(MotionHAL):
         }
 
     def _get_max_velocities(self):
+        # Current value. May have damper applied from base value
         return self.only_used_axes(self.grbl.axes_max_rate())
 
     def _get_max_accelerations(self):
+        # Current value. May have damper applied from base value
         return self.only_used_axes(self.grbl.axes_max_acceleration())
+
+    def _get_abs_max_velocities(self):
+        # No damper applied
+        return self._abs_max_velocities
+
+    def _get_abs_max_accelerations(self):
+        # No damper applied
+        return self._abs_max_accelerations
 
     def assert_not_limit_switch(self):
         # X1 doesn't spam limit switch trip estop
@@ -1501,32 +1590,42 @@ class GrblHal(MotionHAL):
         self.grbl.jog_cancel()
 
     def log_info(self):
-        self.log("GRBL info")
-        try:
-            info = grbl_read_meta(self.grbl.gs)
-        except NoGRBLMeta:
-            self.log("  Config magic number not found")
-            return
-        self.log("  Comment: %s" % (info["comment"], ))
-        self.log("  S/N: %s" % (info["sn"], ))
-        self.log("  Config: %s" % (info["config"].hex(), ))
+        self.grbl.log_info(log=self.log)
 
-    def apply_damper(self, damper):
-        """
-        NOTE: this function is called very early on
-        before configure()
-        We can do it after but would need to maybe call configure again
-        """
-        assert self._hal_max_velocities is None, "must be called before configure()"
-        velocities = self._get_max_velocities()
-        accelerations = self._get_max_accelerations()
+    def _do_apply_damper(self, damper):
+        velocities = dict(self._get_abs_max_velocities())
+        accelerations = dict(self._get_abs_max_accelerations())
         for axis in self.axes():
             velocities[axis] = velocities[axis] * damper
             accelerations[axis] = accelerations[axis] * damper
         self.grbl.axes_set_max_rate(velocities)
         self.grbl.axes_set_max_acceleration(accelerations)
 
+    '''
+    def apply_damper_early(self, damper):
+        """
+        NOTE: this function is called very early on
+        before configure()
+        We can do it after but would need to maybe call configure again
+        """
+        assert self._hal_max_velocities is None, "must be called before configure()"
+        self._apply_damper(damper)
+    '''
+
+    def _apply_damper(self, damper):
+        # Should we allow overclock?
+        assert 0 < damper <= 1.0, f"invalid damper require 0 < {damper} <= 1.0"
+        try:
+            self._do_apply_damper(damper)
+            # Recalculate constants
+            self.reconfigure()
+        except:
+            print("WARNING: apply damper failed. Restoring default value")
+            self._do_apply_damper(1.0)
+            self.reconfigure()
+
     def validate_microscope_model(self, name):
+        self.check_thread_safety()
         try:
             info = grbl_read_meta(self.grbl.gs)
         except NoGRBLMeta:
@@ -1782,7 +1881,6 @@ def grbl_write_meta(gs, config=None, sn=None, comment=None):
 def parse_gcode_coords(gcode_coords):
     # WARNING: this format loses LSB sometimes
     def parse_format1(gcode_coords):
-        print("check 1")
         items = {}
         for wcsn, coords in gcode_coords.items():
             buf = b""
@@ -1790,8 +1888,6 @@ def parse_gcode_coords(gcode_coords):
                 buf += struct.pack("<i", int(float(part) * 1000))[0:3]
             items[wcsn] = buf
         if items[WCS_CONFIG][0:len(USCOPE_MAGIC1)] != USCOPE_MAGIC1:
-            print("bad1", items[WCS_CONFIG][0:len(USCOPE_MAGIC1)],
-                  USCOPE_MAGIC1)
             return None
         ret = {}
         ret["config"] = items[WCS_CONFIG][len(USCOPE_MAGIC1
@@ -1866,16 +1962,32 @@ def microscope_name_hash(microscope):
     return hashlib.sha1(microscope.encode("ascii")).digest()[0:4]
 
 
-def microscope_by_name_hash(h):
+def microscope_hash2name_name2hash():
     subdirs = [f.path for f in os.scandir("configs") if f.is_dir()]
-
+    hash2name = {}
+    name2hash = {}
     for d in subdirs:
         d = os.path.basename(d)
-        if microscope_name_hash(d) == h:
-            return d
+        h = microscope_name_hash(d)
+        hash2name[h] = d
+        name2hash[d] = h
+    return hash2name, name2hash
+
+
+def microscope_hash2name():
+    hash2name, _name2hash = microscope_hash2name_name2hash()
+    return hash2name
+
+
+def microscope_by_name_hash(h):
+    hash2name = microscope_hash2name()
+
+    name = hash2name.get(h)
+    if name:
+        return name
     print("Config name hashes")
-    for d in subdirs:
-        print("  %s: %s" % (d, microscope_name_hash(d).hex()))
+    for this_h, name in hash2name.items():
+        print("  %s: %s" % (name, this_h.hex()))
     raise Exception(f"failed to find a microscope config for hash {h.hex()}")
 
 
@@ -1883,7 +1995,7 @@ def get_grbl(port=None, gs=None, reset=False, verbose=False):
     return GRBL(port=port, gs=gs, reset=reset, verbose=verbose)
 
 
-def grbl_mconfig(mconfig={}):
+def grbl_mconfig(mconfig={}, overwrite=False):
     """
     Create a minimal GRBL config to see if it has metadata to configure microscope
     """
@@ -1901,6 +2013,8 @@ def grbl_mconfig(mconfig={}):
     finally:
         if grbl:
             grbl.close()
-    mconfig["name"] = microscope_by_name_hash(info["config"])
-    mconfig["serial"] = info["sn"]
+    if overwrite or "name" not in mconfig:
+        mconfig["name"] = microscope_by_name_hash(info["config"])
+    if overwrite or "serial" not in mconfig:
+        mconfig["serial"] = info["sn"]
     return mconfig

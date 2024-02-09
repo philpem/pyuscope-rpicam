@@ -9,7 +9,7 @@ from uscope.joystick import JoystickNotFound
 from uscope.microscope import Microscope
 from uscope.kinematics import Kinematics
 from uscope.motion.hal import HomingAborted
-from uscope.motion.grbl import LimitSwitchActive
+from uscope.motion.grbl import LimitSwitchActive, Estop
 
 from PyQt5 import Qt
 from PyQt5.QtGui import *
@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import *
 
 import os.path
 import sys
+import threading
 """
 Common GUI related services to a typical application
 Owns core logging, motion, and imaging objects
@@ -152,6 +153,7 @@ class ArgusCommon(QObject):
         QObject.__init__(self)
 
         self.mw = mw
+        self.tabs = {}
         self.logs = []
 
         self.motion_thread = None
@@ -161,9 +163,28 @@ class ArgusCommon(QObject):
         self.task_thread = None
 
         self.bc = get_bc()
-        self.microscope = Microscope(auto=False,
-                                     configure=False,
-                                     name=microscope_name)
+        self.check_threads = self.bc.check_threads()
+        if self.check_threads:
+            print("ArgusCommon: checking threads")
+        self.main_thread = threading.get_ident()
+
+        try:
+            self.microscope = Microscope(auto=False,
+                                         configure=False,
+                                         name=microscope_name)
+        # vm1 GRBL is queried during auto config
+        except Estop:
+            QMessageBox.critical(
+                None, "Error",
+                "Emergency stop is activated. Check estop button and/or power supply and then re-home",
+                QMessageBox.Ok, QMessageBox.Ok)
+            raise
+        except LimitSwitchActive:
+            QMessageBox.critical(
+                None, "Error",
+                "Limit switch tripped. Manually move away from limit switches and then re-home",
+                QMessageBox.Ok, QMessageBox.Ok)
+            raise
         self.usc = self.microscope.usc
         self.usc.app_register("argus", USCArgus)
         self.aconfig = self.usc.app("argus")
@@ -238,6 +259,9 @@ class ArgusCommon(QObject):
     def post_ui_init(self):
         # Try to do critical initialization first in case something fails
 
+        # Now that UI is setup start directing log messages here
+        self.microscope.log = self.emit_log
+
         # hack...used by joystick...
         # self.microscope.jog_abs_lazy = self.motion_thread.jog_abs_lazy
         self.microscope.jog_fractioned_lazy = self.motion_thread.jog_fractioned_lazy
@@ -282,6 +306,12 @@ class ArgusCommon(QObject):
                 "Limit switch tripped. Manually move away from limit switches and then re-home",
                 QMessageBox.Ok, QMessageBox.Ok)
             raise
+        except Estop:
+            QMessageBox.critical(
+                None, "Error",
+                "Emergency stop is activated. Check estop button and/or power supply and then re-home",
+                QMessageBox.Ok, QMessageBox.Ok)
+            raise
 
         self.motion_thread.start()
         if self.joystick_thread:
@@ -309,28 +339,49 @@ class ArgusCommon(QObject):
 
         if not self.bc.check_panotools():
             self.log("WARNING panotools: incomplete installation")
-            self.log("  enblend: " + str(self.bc.enblend_cli()))
+            # self.log("  enblend: " + str(self.bc.enblend_cli()))
             self.log("  enfuse: " + str(self.bc.enfuse_cli()))
             self.log("  align_image_stack: " +
                      str(self.bc.align_image_stack_cli()))
 
-    def shutdown(self):
+        if self.microscope.bc.stress_test():
+            self.log("WARNING: stress test enabled")
+
+    def shutdown_request(self):
         if self.motion_thread:
-            self.motion_thread.shutdown()
+            self.motion_thread.shutdown_request()
+        if self.planner_thread:
+            self.planner_thread.shutdown_request()
+        if self.image_processing_thread:
+            self.image_processing_thread.shutdown_request()
+        if self.joystick_thread:
+            self.joystick_thread.shutdown_request()
+        if self.task_thread:
+            self.task_thread.shutdown_request()
+
+    def shutdown_join(self):
+        if self.motion_thread:
+            self.motion_thread.shutdown_join()
             # causes too many corner cases
             # self.motion_thread = None
         if self.planner_thread:
-            self.planner_thread.shutdown()
+            self.planner_thread.shutdown_join()
             # self.planner_thread = None
         if self.image_processing_thread:
-            self.image_processing_thread.shutdown()
+            self.image_processing_thread.shutdown_join()
             # self.image_processing_thread = None
         if self.joystick_thread:
-            self.joystick_thread.shutdown()
+            self.joystick_thread.shutdown_join()
             # self.joystick_thread = None
         if self.task_thread:
-            self.task_thread.shutdown()
+            self.task_thread.shutdown_join()
             # self.task_thread = None
+
+    def check_thread_safety(self):
+        if self.check_threads:
+            assert self.main_thread == threading.get_ident(), (
+                "GUI thread unsafe access detected", self.main_thread,
+                threading.get_ident())
 
     def cache_save(self, cachej):
         self.microscope.cache_save(cachej)
@@ -338,12 +389,20 @@ class ArgusCommon(QObject):
     def cache_load(self, cachej):
         self.microscope.cache_load(cachej)
 
+    def cache_sn_save(self, cachej):
+        self.microscope.cache_sn_save(cachej)
+
+    def cache_sn_load(self, cachej):
+        self.microscope.cache_sn_load(cachej)
+
     def init_imager(self):
         source = self.vidpip.source_name
         self.log('Loading imager %s...' % source)
         # Gst is pretty ingrained for the GUI
         #
         self.imager = imager.get_gui_imager(source, self)
+        # gst pipeline already created / should be ready to go
+        self.imager.device_restarted()
 
     def emit_log(self, s='', newline=True):
         # event must be omitted from the correct thread
@@ -351,6 +410,10 @@ class ArgusCommon(QObject):
         self.log_msg.emit(s)
 
     def log(self, s='', newline=True):
+        """
+        WARNING: this is not thread safe
+        If you need something thread safe use microscope.log
+        """
         for log in self.logs:
             log(s, newline=newline)
 
@@ -383,10 +446,15 @@ class ArgusCommon(QObject):
         """
         Mostly looking for crashes in other contexts to propagate up
         """
+        # It is not always possible to recover a motion controller crash without re-homing (ex: LIP-X1)
+        # We also have seen some transient serial errors but full crashes seem to be pretty rare
         if self.motion_thread and self.motion_thread.motion is None:
             raise ArgusShutdown("Motion thread crashed")
+        # In theory we can fairly quickly restart camera on disconnect
         if self.vidpip and not self.vidpip.ok:
-            raise ArgusShutdown("Video pipeline crashed")
+            # raise ArgusShutdown("Video pipeline crashed")
+            self.log("WARNING: video pipeline crashed. Attempting restart")
+            self.recover_video_crash()
 
     def joystick_disable(self):
         jl = self.mainTab.motion_widget.joystick_listener
@@ -402,7 +470,9 @@ class ArgusCommon(QObject):
         """
         Return currently selected objective configuration
         """
-        return self.mainTab.objective_widget.obj_config
+        ret = self.mainTab.objective_widget.obj_config
+        assert ret
+        return ret
 
     def imaging_config(self):
         """
@@ -417,7 +487,13 @@ class ArgusCommon(QObject):
         return self.scriptingTab.active_objective["name"]
 
     def set_active_objective(self, objective):
-        """
-        Check if name is in cache
-        """
         self.mainTab.objective_widget.setObjective.emit(objective)
+
+    def recover_video_crash(self):
+        prop_cache = self.control_scroll.get_prop_cache()
+        self.vidpip.recover_video_crash()
+        # FIXME: maybe this needs to be delayed until we are actually up?
+        # In any case GUI will still have old state and it might "just work"
+        # Assume we are good
+        # If the camera is still gone we'll get a pipeline crash in a second or so
+        self.control_scroll.recover_video_crash(prop_cache)

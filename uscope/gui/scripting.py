@@ -2,7 +2,7 @@ from uscope.gui.widgets import ArgusTab
 from uscope.gui.input_widget import InputWidget
 from uscope.motion import motion_util
 from uscope.microscope import StopEvent, MicroscopeStop
-from uscope.util import readj, writej
+from uscope.util import readj, writej, time_str_1dec
 
 from PyQt5 import Qt
 from PyQt5.QtGui import *
@@ -57,6 +57,8 @@ class ArgusScriptingPlugin(QThread):
         # Graceful shutdown request
         self._running = threading.Event()
         self.reset()
+        self.tstart = None
+        self.tend = None
 
     def reset(self):
         self._succeeded = None
@@ -83,11 +85,12 @@ class ArgusScriptingPlugin(QThread):
         """
         return self._input
 
-    def set_input_default(self, label, value):
+    def set_input_default(self, k, value):
         """
         Allows a script to have modes that setup various parameters
+        NOTE: this used to be by label, now its by key
         """
-        self.new_defaults[label] = value
+        self.new_defaults[k] = value
 
     def fail(self, message):
         """
@@ -109,7 +112,12 @@ class ArgusScriptingPlugin(QThread):
     def succeeded(self):
         return bool(self._succeeded)
 
-    def run(self):
+    def run(self, input_=None, button_value=None, top_level=True):
+        self.tstart = time.time()
+        if button_value is not None:
+            self._input = {"button": {"value": button_value}}
+        if input_ is not None:
+            self._input = input_
         self.ident = threading.current_thread().ident
         try:
             with StopEvent(self._ac.microscope) as self.se:
@@ -156,12 +164,16 @@ class ArgusScriptingPlugin(QThread):
             traceback.print_exc()
         finally:
             self._running.clear()
-            self.done.emit()
+            if top_level:
+                self.done.emit()
 
     def wrap_cleanup(self, msg):
+        self.tend = time.time()
         try:
             self._running.set()
             self.log(msg)
+            self.log("Completed after %s" %
+                     time_str_1dec(self.tend - self.tstart))
             try:
                 self.cleanup()
             except Exception as _e:
@@ -208,11 +220,15 @@ class ArgusScriptingPlugin(QThread):
         {"x": 12.345, "y": 2.356, "z": 4.5}
         """
         self.check_running()
+
+        # TODO: find a way to get exceptions to bubble up here
+        self._ac.motion.check_valid_position(pos)
         self._ac.motion_thread.move_absolute(pos, block=block)
         self.check_running()
 
     def move_relative(self, pos, block=True):
         self.check_running()
+        # TODO: find a way to get exceptions to bubble up here
         self._ac.motion_thread.move_relative(pos, block=block)
         self.check_running()
 
@@ -246,7 +262,7 @@ class ArgusScriptingPlugin(QThread):
             time.sleep(min(delta, remain))
         self.check_running()
 
-    def image(self, wait_imaging_ok=True):
+    def image(self, wait_imaging_ok=True, raw=False):
         """
         Request and return a snapshot as PIL image
 
@@ -256,7 +272,12 @@ class ArgusScriptingPlugin(QThread):
         if wait_imaging_ok:
             self.wait_imaging_ok()
         imager = self.imager()
-        return imager.get_processed()
+        if raw:
+            images = imager.get()
+            assert len(images) == 1
+            return images["0"]
+        else:
+            return imager.get_processed()
 
     def wait_imaging_ok(self):
         """
@@ -287,19 +308,35 @@ class ArgusScriptingPlugin(QThread):
         return self._ac.microscope.objectives.get_full_config()
 
     def get_objective_config(self):
+        """
+        Sample entry:
+
+        {
+            "magnification": 5,
+            "model": "5X",
+            "na": 0.1,
+            # The auto-generated name on the dropdown menu
+            "name": "5X",
+            "tsettle_motion": 0.0,
+            "um_per_pixel": 1.0,
+            "vendor": "Mock",
+            "x_view": 0.8,
+            "y_view": 0.75
+        }
+        """
         return self.get_objectives_config()[self.get_active_objective()]
 
     def get_active_objective(self):
         """
         Returns the name of the active objective
         """
-        return self._ac.get_active_objective()
+        return self._ac.microscope.get_active_objective()
 
     def set_active_objective(self, objective):
         """
         Check if name is in cache
         """
-        self.ac.set_active_objective(objective)
+        self._ac.microscope.set_active_objective(objective)
 
     def microscope_model(self):
         """
@@ -319,6 +356,20 @@ class ArgusScriptingPlugin(QThread):
     Advanced API
     Try to use the higher level functions first if possible
     """
+
+    def run_plugin(self, plugin, input_=None, button_value=None):
+        p = plugin.Plugin(ac=self._ac)
+        """
+        WARNING: this is very rough and doesn't work well
+
+        TODO:
+        -Better Input defaults
+        -Imports don't get fully cleaned?
+        -Cleanup / stop doesn't work correctly
+        """
+        p.log = self.log
+        p.check_running = self.check_running
+        p.run(input_=input_, button_value=button_value, top_level=False)
 
     def run_planner(self, pconfig):
         assert 0, "FIXME"
@@ -356,6 +407,12 @@ class ArgusScriptingPlugin(QThread):
         Enable backlash compensation
         """
         self._ac.motion_thread.backlash_enable(block=block)
+
+    def set_um_per_pixel_raw_1x(self, val):
+        """
+        Set calibration info
+        """
+        self._ac.mainTab.objective_widget.setUmPerPixelRaw1x.emit(val)
 
     """
     Plugin defined functions
@@ -575,6 +632,7 @@ class ScriptingTab(ArgusTab):
         self.status_le.setText("Status: idle")
         self.input.configure({})
         self.log_widget.clear()
+        self.run_pb.setEnabled(False)
 
     def set_filename(self, filename):
         self.fn_le.setText(filename)
@@ -588,9 +646,13 @@ class ScriptingTab(ArgusTab):
         if self.running:
             self.log_local("Can't run while already running")
             return
+        # This can happen if plugin fails to load
+        if self.plugin is None:
+            self.log_local("Can't run without plugin")
+            return
 
         if input_val is None:
-            input_val = self.input.getValue()
+            input_val = self.input.getValues()
         self.plugin._input = input_val
         for pb in self.select_pbs.values():
             pb.setEnabled(False)
@@ -609,7 +671,7 @@ class ScriptingTab(ArgusTab):
 
     # An alternate way to launch using custom buttons
     def inputWidgetClicked(self, j):
-        input_val = self.input.getValue()
+        input_val = self.input.getValues()
         input_val["button"] = j
         self.run_pb_clicked(input_val=input_val)
 
@@ -652,14 +714,14 @@ class ScriptingTab(ArgusTab):
             return
         try:
             j = readj(filename)
-            self.input.setValue(j)
+            self.input.setValues(j)
         except Exception as e:
             self.log_local(f"Failed to load script config: {type(e)}: {e}")
             traceback.print_exc()
 
     def set_config(self, j):
         try:
-            self.input.setValue(j)
+            self.input.setValues(j)
         except Exception as e:
             self.log_local(f"Failed to load script config: {type(e)}: {e}")
             traceback.print_exc()
@@ -675,14 +737,14 @@ class ScriptingTab(ArgusTab):
             return
         filename = str(filename[0])
 
-        j = self.input.getValue()
+        j = self.input.getValues()
         writej(filename, j)
 
     def plugin_done(self):
         if self.plugin.succeeded():
             status = "Status: finished ok"
             try:
-                self.input.update_defaults(self.plugin.new_defaults)
+                self.input.setValues(self.plugin.new_defaults)
             except KeyError as e:
                 self.log_local(f"Failed to update defaults: bad label: {e}")
             except Exception as e:
@@ -707,10 +769,9 @@ class ScriptingTab(ArgusTab):
     def _post_ui_init(self):
         pass
 
-    def _shutdown(self):
+    def _shutdown_request(self):
         if self.plugin:
             self.plugin.shutdown()
-            self.plugin = None
 
     def log_local(self, s='', newline=True):
         s = str(s)
@@ -741,7 +802,7 @@ class ScriptingTab(ArgusTab):
     def _cache_save(self, cachej):
         j = {}
         j["filename"] = str(self.fn_le.text())
-        j["config"] = self.input.getValue()
+        j["config"] = self.input.getValues()
         cachej["scripting"] = j
 
     def _cache_load(self, cachej):

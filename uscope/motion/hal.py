@@ -4,6 +4,7 @@ import os
 from collections import OrderedDict
 from uscope.util import time_str
 from uscope.motion.motion_util import parse_move
+import threading
 
 
 class AxisExceeded(ValueError):
@@ -605,8 +606,26 @@ class MotionHAL:
         self.ask_home = self.default_ask_home
         self.home_progress = self.default_home_progress
 
+        self.check_threads = self.microscope.bc.check_threads()
+        self.check_thread_id = None
+        if self.check_threads:
+            print(f"Motion {self} ({type(self)}): checking threads requested")
+
     def __del__(self):
         self.close()
+
+    def update_check_thread(self):
+        self.check_thread_id = threading.get_ident()
+        if self.check_threads:
+            print(
+                f"Motion {self} ({type(self)}): checking threads enabled with {self.check_thread_id}"
+            )
+
+    def check_thread_safety(self):
+        if self.check_threads and self.check_thread_id:
+            assert self.check_thread_id == threading.get_ident(), (
+                "GUI thread unsafe access detected", self.main_thread,
+                threading.get_ident())
 
     def default_ask_home(self):
         while True:
@@ -672,6 +691,19 @@ class MotionHAL:
         if abs_:
             self.axes_abs(axes)
         return axes
+
+    def check_valid_position(self, pos):
+        self.validate_axes(pos)
+        limits = self.get_soft_limits()
+        for axis, axpos in pos.items():
+            axmin = limits["mins"].get(axis)
+            axmax = limits["maxs"].get(axis)
+            if axmin is None or axmax is None:
+                continue
+            if not self.axis_pos_in_range(axis, axmin, axpos, axmax):
+                raise AxisExceeded(
+                    "axis %s: out of range %0.3f <= got %0.3f <= %0.3f" %
+                    (axis, axmin, axpos, axmax))
 
     def _get_machine_limits(self):
         return {"mins": {}, "maxs": {}}
@@ -984,7 +1016,8 @@ class MotionHAL:
     def pos(self):
         '''Return current position for all axes'''
         # print("")
-        pos = self._pos()
+        self.check_thread_safety()
+        pos = self.only_used_axes(self._pos())
         self.process_pos(pos)
         return pos
 
@@ -995,6 +1028,7 @@ class MotionHAL:
     def move_absolute(self, pos, options={}):
         '''Absolute move to positions specified by pos dict'''
         assert self.jog_estimated_end is None, f"Can't move while jogging ({self.jog_estimated_end})"
+        self.check_thread_safety()
         if len(pos) == 0:
             return
         self.validate_axes(pos.keys())
@@ -1004,6 +1038,7 @@ class MotionHAL:
 
     def _move_absolute_wrap(self, pos, options={}):
         '''Absolute move to positions specified by pos dict'''
+        pos = dict(pos)
         try:
             for modifier in self.iter_active_modifiers():
                 modifier.move_absolute_pre(pos, options=options)
@@ -1172,6 +1207,7 @@ class MotionHAL:
         period: how often commands will be issued
             longer period => jog further to keep constant
         """
+        self.check_thread_safety()
         # print("")
         # print("jog_fractioned", axes, period, time.time())
         tstart = time.time()
@@ -1243,6 +1279,7 @@ class MotionHAL:
         raise NotSupported("Required for jogging")
 
     def jog_cancel(self):
+        self.check_thread_safety()
         self._jog_cancel()
         # No longer jogging
         self.jog_estimated_end = None
@@ -1302,6 +1339,13 @@ class MotionHAL:
         Machine dependent definition, but generally a single line of g-code
         Some machines only support binary => may be not supported
         """
+        raise NotSupported("")
+
+    def apply_damper(self, damper):
+        self.check_thread_safety()
+        self._apply_damper(damper)
+
+    def _apply_damper(self, damper):
         raise NotSupported("")
 
 
@@ -1368,6 +1412,9 @@ class MockHal(MotionHAL):
         Print some high level debug info
         """
         self.log("Motion: no additional info")
+
+    def apply_damper(self, damper):
+        pass
 
 
 """

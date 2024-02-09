@@ -208,6 +208,7 @@ class ImagerControlScroll(QScrollArea):
         # self.verbose = True
         self.log = lambda x: print(x)
         self.groups = groups
+        self.optional_disp_props = set()
 
         self.layout = QVBoxLayout()
         self.layout.addLayout(self.buttonLayout())
@@ -220,6 +221,12 @@ class ImagerControlScroll(QScrollArea):
         self.disp2element = OrderedDict()
         # Indexed by low level name
         self.raw2element = OrderedDict()
+
+        # Used for saving / restoring state
+        # In particular to restore if the camera disconnects
+        # (or maybe save on exit)
+        self.raw_cache = {}
+        self.disp_cache = {}
 
     def post_imager_ready(self):
         """
@@ -237,8 +244,14 @@ class ImagerControlScroll(QScrollArea):
             row = 0
             groupbox.setLayout(layoutg)
 
-            for _disp_name, prop in properties.items():
-                if not self.validate_raw_name(prop):
+            for _raw_name, prop in properties.items():
+                # TODO: should load this earlier?
+                # currently cal is loaded after this
+                if prop.get("optional", True):
+                    disp_name = prop.get("disp_name", prop["prop_name"])
+                    # self.optional_raw_props.add(raw_name)
+                    self.optional_disp_props.add(disp_name)
+                if not self.validate_prop_config(prop):
                     continue
                 # assert disp_name == prop["disp_name"]
                 row = self._assemble_property(prop, layoutg, row)
@@ -304,6 +317,13 @@ class ImagerControlScroll(QScrollArea):
         assert prop_name not in self.raw2element
         self.raw2element[prop_name] = element
 
+        # Normal users don't need to change these
+        # but its needed to configure the camera
+        # See https://github.com/Labsmore/pyuscope/issues/274
+        # Ex: hflip/vflip
+        if not prop.get("visible", True):
+            element.setVisible(self.ac.microscope.bc.dev_mode())
+
         return row
 
     def refresh_defaults(self):
@@ -338,8 +358,17 @@ class ImagerControlScroll(QScrollArea):
         for disp_name, val in vals.items():
             try:
                 element = self.disp2element[disp_name]
-            except:
+            except KeyError:
+                # Not present on this system?
+                # Ignore it
+                # Likely loaded calibration not applicable in this case
+                if disp_name in self.optional_disp_props:
+                    continue
+
+                print("")
+                print("disp_name not found", disp_name)
                 print("Widget properites:", self.disp2element.keys())
+                print("Optional properties", self.optional_disp_props)
                 print("Set properites:", vals)
                 raise
             # Rely on GUI signal writing API unless GUI updates are disabled
@@ -364,14 +393,20 @@ class ImagerControlScroll(QScrollArea):
         Update state based on camera API
         Query all GUI controlled properties and update GUI to reflect current state
         """
-        for disp_name, val in self.get_disp_properties().items():
-            # print("Should update %s: %s" % (disp_name, self.disp2element[disp_name]["push_prop"]))
-            element = self.disp2element[disp_name]
-            # Force GUI to take readback values on first update
-            if not element.config["gui_driven"] or self.first_update:
-                element.disp_property_set_widgets(
-                    val, first_update=self.first_update)
-        self.first_update = False
+        try:
+            for disp_name, val in self.get_disp_properties().items():
+                # print("Should update %s: %s" % (disp_name, self.disp2element[disp_name]["push_prop"]))
+                element = self.disp2element[disp_name]
+                # Force GUI to take readback values on first update
+                if not element.config["gui_driven"] or self.first_update:
+                    element.disp_property_set_widgets(
+                        val, first_update=self.first_update)
+            self.first_update = False
+        # 2023-12-17
+        # VM1 / UVC issue trying to chase down
+        # Can we recover or do we need to re-open the camera?
+        except OSError:
+            self.log("WARNING: camera bad file descriptor on read")
 
     def update_by_cam_defaults(self):
         """
@@ -428,6 +463,7 @@ class ImagerControlScroll(QScrollArea):
         self.verbose and print(f"raw_prop_write() {name} = {value}")
         self._raw_prop_write(name, value)
         self.raw_prop_written(name, value)
+        self.raw_cache[name] = value
 
     def raw_prop_read(self, name, default=False):
         """
@@ -436,6 +472,7 @@ class ImagerControlScroll(QScrollArea):
         ret = self._raw_prop_read(name)
         self.verbose and print(f"raw_prop_read() {name} = {ret}")
         self.raw_prop_was_read(name, ret)
+        self.raw_cache[name] = ret
         return ret
 
     def _raw_prop_write(self, name, value):
@@ -455,13 +492,34 @@ class ImagerControlScroll(QScrollArea):
     def disp_prop_read(self, disp_name):
         element = self.disp2element[disp_name]
         raw = self.raw_prop_read(element.config["prop_name"])
-        return element.val_raw2disp(raw)
+        ret = element.val_raw2disp(raw)
+        self.disp_cache[disp_name] = ret
+        return ret
 
     def disp_prop_write(self, disp_name, disp_val):
         element = self.disp2element[disp_name]
         raw_val = element.val_disp2raw(disp_val)
         # print("translate to raw val", raw_val)
         self.raw_prop_write(element.config["prop_name"], raw_val)
+        self.disp_cache[disp_name] = disp_val
+
+    def get_prop_cache(self):
+        return {
+            "disp": dict(self.disp_cache),
+            "raw": dict(self.raw_cache),
+        }
+
+    def recover_video_crash(self, prop_cache):
+        """
+        Its unclear the best way to deal with this
+        Think just write everything and let the GUI update is best
+        Assume for now that only disp properties are needed
+
+        Assumes that all properties are contained in prop_cache
+        We could also force GUI elements to update if we wanted to be really sure
+        """
+        for disp_name, disp_val in prop_cache["disp"].items():
+            self.disp_prop_write(disp_name, disp_val)
 
     def cal_load_clicked(self, checked):
         self.cal_load(load_data_dir=True)
@@ -477,7 +535,7 @@ class ImagerControlScroll(QScrollArea):
             # source=self.vidpip.source_name
             j = self.ac.microscope.usc.imager.cal_load(
                 load_data_dir=load_data_dir)
-        except ValueError as e:
+        except Exception as e:
             self.log("WARNING: Failed to load cal: %s" % (e, ))
             return
         if not j:
@@ -487,7 +545,7 @@ class ImagerControlScroll(QScrollArea):
     def cal_save(self):
         self.ac.microscope.usc.imager.cal_save_to_data(
             source=self.vidpip.source_name,
-            properties=self.get_disp_properties(),
+            disp_properties=self.get_disp_properties(),
             mkdir=True)
 
     def run(self):
@@ -537,13 +595,16 @@ class ImagerControlScroll(QScrollArea):
                 continue
             element.set_gui_driven(val)
 
-    def validate_raw_name(self, prop_config):
+    def validate_prop_config(self, prop_config):
         """
         Return True if should keep
         Return False if should drop (optional / not on this system)
         Throw exception if inherently bad (not optional and not found)
         """
         return True
+
+    def is_disp_prop_optional(self, disp_prop):
+        return disp_prop in self.optional_disp_props
 
 
 """

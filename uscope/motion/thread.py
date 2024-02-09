@@ -68,6 +68,9 @@ class MotionThreadMotion(MotionHAL):
     def jog_cancel(self):
         return self.mt.jog_cancel()
 
+    def apply_damper(self, damper):
+        return self.mt.apply_damper(damper)
+
     def command(self, command):
         return self.mt.mdi(command)
 
@@ -86,6 +89,7 @@ class JogController:
         self.jogging = False
         self.dts = []
         self.tlast = None
+        self.slow_jogs = 0
 
     def update(self, axes):
         # XXX: adjust jogging based on actual loop time instead of estimated?
@@ -106,6 +110,7 @@ class JogController:
                     f"JOG WARNING: actual loop time {this_dt} is less than estimated period {self.period}. GRBL jog queue may overflow"
                 )
             if this_dt > 1.5 * self.period:
+                self.slow_jogs += 1
                 1 and print(
                     f"JOG WARNING: actual loop time {this_dt} is significantly larger than estimated period {self.period}. Jogging may stutter"
                 )
@@ -158,6 +163,9 @@ class JogController:
 class MotionThreadBase(CommandThreadBase):
     def __init__(self, microscope):
         super().__init__(microscope)
+        if self.microscope.bc.check_threads():
+            print("Motion thread init (main thread): %s" %
+                  (threading.get_ident(), ))
         self.verbose = False
         self.queue = queue.Queue()
         self.motion = None
@@ -187,8 +195,8 @@ class MotionThreadBase(CommandThreadBase):
                                      log=self.log,
                                      microscope=self.microscope)
 
-    def log_info(self):
-        self.command("log_info")
+    def log_info(self, block=False):
+        self.command("log_info", block=block)
 
     def setRunning(self, running):
         if running:
@@ -292,6 +300,9 @@ class MotionThreadBase(CommandThreadBase):
     def update_pos_cache(self):
         self.command("update_pos_cache")
 
+    def apply_damper(self, damper, block=False, callback=None):
+        self.command("apply_damper", damper, block=block, callback=callback)
+
     def qsize(self):
         return self.queue.qsize()
 
@@ -333,8 +344,10 @@ class MotionThreadBase(CommandThreadBase):
             self.log("WARNING: jog disabled, dropping jog cancel")
 
     def run(self):
-        self.verbose and print("Motion thread started: %s" %
-                               (threading.get_ident(), ))
+        if self.microscope.bc.check_threads():
+            print("Motion thread started: %s" % (threading.get_ident(), ))
+        self.motion.update_check_thread()
+        self.motion.check_thread_safety()
         self.running.set()
         self.idle.clear()
         self.motion.on()
@@ -437,6 +450,7 @@ class MotionThreadBase(CommandThreadBase):
                     'unestop': self.motion.unestop,
                     'mdi': self.motion.command,
                     'log_info': self.motion.log_info,
+                    'apply_damper': self.motion.apply_damper,
                 }.get(command, default)
                 tstart = time.time()
                 try:
@@ -464,6 +478,9 @@ class MotionThreadBase(CommandThreadBase):
                     print(traceback.format_exc())
                     if command_done:
                         command_done(command, args, e)
+                    if self.microscope.bc.dev_mode():
+                        import sys
+                        sys.exit(1)
                     continue
                 # motion command update_pos_cache completed in 0.006439208984375
                 # motion command jog_fractioned completed in 0.021370649337768555

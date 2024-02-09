@@ -391,6 +391,7 @@ class JoystickTab(ArgusTab):
 class ObjectiveWidget(AWidget):
 
     setObjective = pyqtSignal(str)
+    setUmPerPixelRaw1x = pyqtSignal(float)
 
     def __init__(self, ac, aname=None, parent=None):
         super().__init__(ac=ac, aname=aname, parent=parent)
@@ -403,9 +404,12 @@ class ObjectiveWidget(AWidget):
         self.selected_objective_name = None
         self.default_objective_index = 0
         self.global_scalar = None
+        self.um_per_pixel_raw_1x = None
         self.updating_objectives = False
+        self.default_objective_name = None
 
         self.setObjective.connect(self.set_objective)
+        self.setUmPerPixelRaw1x.connect(self.set_um_per_pixel_raw_1x)
 
     def _initUI(self):
         self.advanced_widgets = []
@@ -450,7 +454,10 @@ class ObjectiveWidget(AWidget):
 
     def _post_ui_init(self):
         self.reload_obj_cb()
-        self.obj_cb.currentIndexChanged.connect(self.update_obj_config)
+
+    def set_um_per_pixel_raw_1x(self, val):
+        self.um_per_pixel_raw_1x = val
+        self.reload_obj_cb()
 
     def reload_obj_cb(self):
         '''Re-populate the objective combo box'''
@@ -459,6 +466,8 @@ class ObjectiveWidget(AWidget):
         self.objectives = self.ac.microscope.get_objectives()
         if self.global_scalar:
             self.objectives.set_global_scalar(self.global_scalar)
+        if self.um_per_pixel_raw_1x:
+            self.objectives.set_um_per_pixel_raw_1x(self.um_per_pixel_raw_1x)
         for name in self.objectives.names():
             self.obj_cb.addItem(name)
 
@@ -495,12 +504,19 @@ class ObjectiveWidget(AWidget):
     def modify_objectives_clicked(self):
         self.ac.log("FIXME: not supported")
 
-    def global_scalar_le_return(self):
-        try:
-            self.global_scalar = float(self.global_scalar_le.text())
-        except ValueError:
-            self.ac.log("Failed to parse scalar")
-            return
+    def global_scalar_le_return(self, lazy=False):
+        s = str(self.global_scalar_le.text()).strip()
+        if s:
+            try:
+                self.global_scalar = float(s)
+            except ValueError:
+                self.ac.log("Failed to parse global image scalar")
+                return
+        else:
+            if lazy:
+                return
+            self.global_scalar = 1.0
+        self.ac.log(f"Setting global objective scalar {self.global_scalar}")
         self.reload_obj_cb()
 
     """
@@ -509,17 +525,24 @@ class ObjectiveWidget(AWidget):
     Might also be better to select by name
     """
 
-    def _cache_save(self, cachej):
+    def _cache_sn_save(self, cachej):
         cachej["objective"] = {
             "name": self.selected_objective_name,
             "global_scalar": self.global_scalar_le.text(),
+            "um_per_pixel_raw_1x": self.um_per_pixel_raw_1x,
         }
 
-    def _cache_load(self, cachej):
+    def _cache_sn_load(self, cachej):
         j = cachej.get("objective", {})
+
         self.default_objective_name = j.get("name", None)
         self.global_scalar_le.setText(j.get("global_scalar", ""))
-        self.global_scalar_le_return()
+        self.global_scalar_le_return(lazy=True)
+
+        self.um_per_pixel_raw_1x = j.get("um_per_pixel_raw_1x", None)
+        self.reload_obj_cb()
+        assert self.obj_config, "not loaded :("
+        self.obj_cb.currentIndexChanged.connect(self.update_obj_config)
 
     def set_objective(self, objective):
         index = self.obj_cb.findText(objective)
@@ -775,7 +798,10 @@ class XYPlanner2PWidget(PlannerWidget):
         self.setLayout(gl)
 
     def af_corners(self):
-        return ("ll", "ur")
+        # return ("ll", "ur")
+        # Only makes sense to focus one corner since we don't track z
+        # TODO: do center instead?
+        return ("ll", )
 
     def _cache_save(self, cachej):
         cachej["XY2P"] = {
@@ -839,7 +865,7 @@ class XYPlanner2PWidget(PlannerWidget):
         pconfig["app"] = {
             "app": "argus",
             "objective": objective,
-            "microscope": self.ac.microscope_name,
+            "microscope": self.ac.microscope.name,
         }
 
         out_dir_config = self.get_out_dir_j()
@@ -1024,8 +1050,11 @@ class XYPlanner3PWidget(PlannerWidget):
     def _cache_load(self, cachej):
         j1 = cachej.get("XY3P", {})
 
-        if self.ac.microscope.has_z():
-            self.track_z_cb.setChecked(j1.get("track_z", 1))
+        # This needs to be tracked per s/n or it can become "contaminated"
+        # just force for now since no-track-z is basically deprecated anyway
+        self.track_z_cb.setChecked(self.ac.microscope.has_z())
+        #if self.ac.microscope.has_z():
+        #    self.track_z_cb.setChecked(j1.get("track_z", True))
 
         for group in ("ll", "ul", "lr"):
             widgets = self.corner_widgets[group]
@@ -1119,8 +1148,9 @@ class XYPlanner3PWidget(PlannerWidget):
             self.ac.usc.motion.format_position("x", pos_cur["x"]))
         widgets["y_le"].setText(
             self.ac.usc.motion.format_position("y", pos_cur["y"]))
-        widgets["z_le"].setText(
-            self.ac.usc.motion.format_position("z", pos_cur["z"]))
+        if "z" in pos_cur:
+            widgets["z_le"].setText(
+                self.ac.usc.motion.format_position("z", pos_cur["z"]))
 
     def get_corner_widget_pos(self, corner_name):
         widgets = self.corner_widgets[corner_name]
@@ -1184,7 +1214,7 @@ class ImagingOptionsWindow(QWidget):
 
             self.add_scalebar_cb = QCheckBox()
             self.add_scalebar_cb.stateChanged.connect(
-                self.itw.update_imagine_config)
+                self.itw.update_imaging_config)
             layout.addWidget(self.add_scalebar_cb, row, 0)
             layout.addWidget(QLabel("Add scalebar"), row, 1)
             row += 1
@@ -1198,31 +1228,38 @@ class ImagingOptionsWindow(QWidget):
             layout = QGridLayout()
             row = 0
 
-            layout.addWidget(QLabel("Autofocus corners?"), row, 0)
             self.autofocus_cb = QCheckBox()
             self.autofocus_cb.setChecked(self.ac.microscope.has_z())
             self.autofocus_cb.stateChanged.connect(
-                self.itw.update_imagine_config)
-            layout.addWidget(self.autofocus_cb, row, 1)
+                self.itw.update_imaging_config)
+            layout.addWidget(self.autofocus_cb, row, 0)
+            layout.addWidget(QLabel("Autofocus corners?"), row, 1)
             row += 1
 
             def process_gb():
                 layout = QGridLayout()
                 row = 0
-                """
-                # Used as generic "should stitch", although is labeled CloudStitch
-                layout.addWidget(QLabel("Post-process / CloudStitch?"), row, 0)
-                self.stitch_cb = QCheckBox()
-                self.stitch_cb.stateChanged.connect(
-                    self.itw.update_imagine_config)
-                layout.addWidget(self.stitch_cb, row, 1)
+
+                self.cloudstitch_cb = QCheckBox()
+                if self.ac.stitchingTab.has_cs_info():
+                    self.ac.log("CloudStitch: available")
+                    self.cloudstitch_cb.setChecked(True)
+                else:
+                    # Currently don't officially support changing at runtime
+                    self.cloudstitch_cb.setEnabled(False)
+                    self.ac.log(
+                        "CloudStitch: not configured. Contact support@labsmore.com to enable"
+                    )
+                self.cloudstitch_cb.stateChanged.connect(
+                    self.itw.update_imaging_config)
+                layout.addWidget(self.cloudstitch_cb, row, 0)
+                layout.addWidget(QLabel("CloudStitch?"), row, 1)
                 row += 1
-                """
 
                 self.keep_intermediate_cb = QCheckBox()
                 self.keep_intermediate_cb.setChecked(True)
                 self.keep_intermediate_cb.stateChanged.connect(
-                    self.itw.update_imagine_config)
+                    self.itw.update_imaging_config)
                 layout.addWidget(self.keep_intermediate_cb, row, 0)
                 layout.addWidget(
                     QLabel("Keep intermediate (unstitched) files?"), row, 1)
@@ -1230,26 +1267,26 @@ class ImagingOptionsWindow(QWidget):
 
                 self.html_cb = QCheckBox()
                 self.html_cb.stateChanged.connect(
-                    self.itw.update_imagine_config)
+                    self.itw.update_imaging_config)
                 layout.addWidget(self.html_cb, row, 0)
                 layout.addWidget(QLabel("HTML viewer?"), row, 1)
                 row += 1
 
                 self.quick_stitch_cb = QCheckBox()
                 self.quick_stitch_cb.stateChanged.connect(
-                    self.itw.update_imagine_config)
+                    self.itw.update_imaging_config)
                 layout.addWidget(self.quick_stitch_cb, row, 0)
                 layout.addWidget(QLabel("Quick stitch?"), row, 1)
                 row += 1
 
                 self.snapshot_grid_cb = QCheckBox()
                 self.snapshot_grid_cb.stateChanged.connect(
-                    self.itw.update_imagine_config)
+                    self.itw.update_imaging_config)
                 layout.addWidget(self.snapshot_grid_cb, row, 0)
                 layout.addWidget(QLabel("Snapshot grid overview?"), row, 1)
                 row += 1
 
-                self.stitch_gb = QGroupBox("Post-process / CloudStitch")
+                self.stitch_gb = QGroupBox("Post-processing")
                 self.stitch_gb.setCheckable(True)
                 self.stitch_gb.setLayout(layout)
 
@@ -1577,14 +1614,41 @@ class ImagingTaskWidget(AWidget):
 
             warning = ""
             if auto_exposure or auto_color:
-                warning = f"WARNING: you have automatic exposure ({auto_exposure}) and/or color correction ({auto_color}) enabled. This will lead to an inconsistent capture\n\n"
+                warning = f"\n\nWARNING: you have automatic exposure ({auto_exposure}) and/or color correction ({auto_color}) enabled. This will lead to an inconsistent capture"
                 mb_type = QMessageBox.warning
 
+            scan_settings = "Scan settings:"
+            scan_settings += "\nAutofocus corners: %s" % (autofocus, )
+            if self.ac.advancedTab.image_stacking_enabled():
+                pm_n = self.ac.advancedTab.image_stacking_pm_n()
+                scan_settings += "\nFocus stacking enabled (+/- %u images => %u per stack)" % (
+                    pm_n, pm_n * 2 + 1)
+                if self.ac.advancedTab.stack_drift_cb.isChecked():
+                    scan_settings += "\nFocus stacking drift correction enabled"
+            if self.ac.advancedTab.image_stablization_enabled():
+                scan_settings += "\nImage stabilization enabled (n=%u)" % (
+                    self.ac.advancedTab.get_image_stablization(), )
+
+            if self.iow.stitch_gb.isChecked():
+                post_settings = "Post processing (stitching) settings:"
+                ippj = {}
+                self.update_ippj(ippj)
+                post_settings += "\nCloudStitch: %s" % (ippj["cloud_stitch"], )
+                post_settings += "\nKeeping intermediate files: %s" % (
+                    ippj["keep_intermediates"], )
+                if ippj["write_html_viewer"]:
+                    post_settings += "\nWriting overview as HTML index"
+                if ippj["write_quick_pano"]:
+                    post_settings += "\nWriting overview as quick image stitch"
+                if ippj["write_snapshot_grid"]:
+                    post_settings += "\nWriting overview as grid image"
+            else:
+                post_settings = "Post processing (stitching) disabled"
+
             ret = mb_type(
-                self, "Start scan?",
-                "Start scan?\n\n%sScan settings:\nAutofocus corners: %s" %
-                (warning, autofocus), QMessageBox.Yes | QMessageBox.Cancel,
-                QMessageBox.Cancel)
+                self, "Start scan?", "Start scan?%s\n\n%s\n\n%s" %
+                (warning, scan_settings, post_settings),
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
             if ret != QMessageBox.Yes:
                 return
 
@@ -1601,15 +1665,16 @@ class ImagingTaskWidget(AWidget):
             )
             return
 
-        self.ac.log('Requesting snapshot')
+        # self.ac.log('Requesting snapshot')
         # Disable until snapshot is completed
         self.snapshot_pb.setEnabled(False)
 
         if hasattr(self.ac, 'capture_sink'):
             # Gstreamer implementation
             def emitSnapshotCaptured(image_id):
-                self.ac.log('Image captured: %s' % image_id)
+                # self.ac.microscope.log('Image captured: %s' % image_id)
                 self.snapshotCaptured.emit(image_id)
+
             self.ac.capture_sink.request_image(emitSnapshotCaptured)
         elif hasattr(self.ac, 'capture_pc2'):
             # Picamera2 implementation
@@ -1637,7 +1702,7 @@ class ImagingTaskWidget(AWidget):
                            parent=self.ac.usc.app("argus").snapshot_dir())
 
     def captureSnapshot(self, image_id):
-        self.ac.log('RX image for saving')
+        # self.ac.log('RX image for saving')
 
         if hasattr(self.ac, 'capture_sink'):
             # Gstreamer implementation
@@ -1665,6 +1730,7 @@ class ImagingTaskWidget(AWidget):
         options = {}
         options["is_snapshot"] = True
         options["image"] = image
+        options["objective_config"] = self.ac.objective_config()
         options["save_filename"] = self.snapshot_fn()
         extension = self.save_extension()
         if extension == ".jpg":
@@ -1674,12 +1740,21 @@ class ImagingTaskWidget(AWidget):
         if self.ac.usc.imager.videoflip_method():
             options["videoflip_method"] = self.ac.usc.imager.videoflip_method()
 
+        imaging_config = self.ac.imaging_config()
+        plugins = {}
+        if imaging_config.get("add_scalebar", False):
+            plugins["annotate-scalebar"] = {}
+        options["plugins"] = plugins
+        qr_regex = config.bc.qr_regex()
+        if qr_regex:
+            options["qr_regex"] = qr_regex
+
         def callback(command, args, ret_e):
             if type(ret_e) is Exception:
-                self.ac.log(f"Snapshot: save failed")
+                self.ac.microscope.log(f"Snapshot: save failed")
             else:
                 filename = args[0]["options"]["save_filename"]
-                self.ac.log(f"Snapshot: saved to {filename}")
+                self.ac.microscope.log(f"Snapshot: saved to {filename}")
 
         self.ac.image_processing_thread.process_image(options=options,
                                                       callback=callback)
@@ -1695,7 +1770,7 @@ class ImagingTaskWidget(AWidget):
             os.mkdir(snapshot_dir)
             self.ac.log('Snapshot dir %s created' % snapshot_dir)
 
-        self.update_imagine_config()
+        self.update_imaging_config()
 
     def _update_pconfig(self, pconfig):
         imagerj = pconfig.setdefault("imager", {})
@@ -1706,6 +1781,10 @@ class ImagingTaskWidget(AWidget):
 
         # Serialized into cs_auto.py CLI option
         ippj = pconfig.setdefault("ipp", {})
+        self.update_ippj(ippj)
+
+    def update_ippj(self, ippj):
+        ippj["cloud_stitch"] = self.iow.cloudstitch_cb.isChecked()
         ippj["write_html_viewer"] = self.iow.html_cb.isChecked()
         ippj["write_quick_pano"] = self.iow.quick_stitch_cb.isChecked()
         ippj["write_snapshot_grid"] = self.iow.snapshot_grid_cb.isChecked()
@@ -1716,6 +1795,10 @@ class ImagingTaskWidget(AWidget):
             "file_name": str(self.job_name_le.text()),
             "extension": self.snapshot_suffix_cb.currentIndex(),
             "stitch": self.iow.stitch_gb.isChecked(),
+            # currently not load cloud stitch state
+            # instead let it default to whether they have creds
+            # However its useful for debug dumps
+            "cloudstitch": self.iow.cloudstitch_cb.isChecked(),
             "autofocus": self.iow.autofocus_cb.isChecked(),
             "add_scalebar": self.iow.add_scalebar_cb.isChecked(),
             "keep_intermediate": self.iow.keep_intermediate_cb.isChecked(),
@@ -1738,7 +1821,7 @@ class ImagingTaskWidget(AWidget):
         self.iow.quick_stitch_cb.setChecked(j.get("quick_stitch", False))
         self.iow.snapshot_grid_cb.setChecked(j.get("snapshot_grid", False))
 
-    def update_imagine_config(self):
+    def update_imaging_config(self):
         self.imaging_config = {
             "stitch": self.iow.stitch_gb.isChecked(),
             "add_scalebar": self.iow.add_scalebar_cb.isChecked(),
@@ -1778,6 +1861,11 @@ class MainTab(ArgusTab):
             setControlsEnabled=self.setControlsEnabled,
             aname="imaging",
             parent=self)
+
+        self.log("pyuscope starting")
+        self.log("https://github.com/Labsmore/pyuscope/")
+        self.log("For enquiries contact support@labsmore.com")
+        self.log("")
 
         self.planner_widget_tabs = QTabWidget()
         self.planner_widget_xy2p = XYPlanner2PWidget(
@@ -1835,6 +1923,9 @@ class MainTab(ArgusTab):
         self.ac.cncProgress.connect(self.imaging_widget.processCncProgress)
 
     def log(self, s='', newline=True):
+        # This is a "high risk" way for non main thread things to modify GUI
+        self.ac.check_thread_safety()
+
         s = str(s)
         # print("LOG: %s" % s)
         if newline:
@@ -1851,6 +1942,9 @@ class MainTab(ArgusTab):
         if self.imaging_widget.log_fd_scan is not None:
             self.imaging_widget.log_fd_scan.write(s)
             self.imaging_widget.log_fd_scan.flush()
+
+    def clear_log(self):
+        self.log_widget.clear()
 
     def go_current_pconfig(self, callback=None):
         scan_config = self.active_planner_widget().get_current_scan_config()
@@ -1931,6 +2025,7 @@ class ImagerTab(ArgusTab):
 
             gb = QGroupBox("HDR")
             gb.setLayout(layout)
+            gb.setVisible(self.ac.microscope.bc.dev_mode())
             return gb
 
         self.layout.addWidget(hdr_gb())

@@ -1,4 +1,3 @@
-import json
 import json5
 import os
 from collections import OrderedDict
@@ -75,8 +74,8 @@ def find_panotools_exe(config, configk, exe_name, flatpak_name):
         _stdout, _stderr = process.communicate()
         exit_code = process.wait()
         if exit_code == 0:
-            return ("flatpak", "run",
-                    f"--command={flatpak_name} net.sourceforge.Hugin")
+            return ("flatpak", "run", "--filesystem=host",
+                    f"--command={flatpak_name}", "net.sourceforge.Hugin")
     # FIME: catch the specific exception for command not found
     except:
         pass
@@ -105,6 +104,22 @@ class USCImager:
         self.microscope = microscope
         #if not "width" in j or not "height" in j:
         #    raise ValueError("width/height required")
+        self.cache_constants()
+
+    def cache_constants(self):
+        # More of a hard real time constant
+        # Something is wrong if this is exceeded
+        self._snapshot_timeout = self.microscope.bc.timeout_scalar_scale(3.0)
+        # If processing gets expensive or backs up this could get high
+        # Maybe this should be set to a high value
+        # However planner etc relies on this running relatively quickly
+        self._processing_timeout = self.microscope.bc.timeout_scalar_scale(5.0)
+
+    def snapshot_timeout(self):
+        return self._snapshot_timeout
+
+    def processing_timeout(self):
+        return self._processing_timeout
 
     def source(self):
         return self.j.get("source", "auto")
@@ -114,14 +129,13 @@ class USCImager:
         The largest possible sensor resolution
         Following are not applied yet: crop, scaling
         """
-        try:
-            w = int(self.j['native_width'])
-            h = int(self.j['native_height'])
-        except KeyError:
+        valw = self.j.get("native_width", self.j.get("width"))
+        valh = self.j.get("native_height", self.j.get("height"))
+        if valw is None or valh is None:
             raise Exception(
                 "can't compute um_per_pixel_raw_1x: not specified and missing native_width/height"
             )
-        return w, h
+        return int(valw), int(valh)
 
     def raw_wh(self):
         """
@@ -273,20 +287,22 @@ class USCImager:
 
     def cal_load(self, load_data_dir=True):
         def load_config(fn):
-            if not fn:
+            try:
+                if not fn:
+                    return {}
+                if not os.path.exists(fn):
+                    return {}
+                configj = readj(fn)
+                configs = configj["configs"]
+                config = configs["default"]
+                #if source and config["source"] != source:
+                #    raise ValueError("Source mismatches in config file")
+                if "disp_properties" not in config:
+                    raise ValueError("Old config format")
+                return config["disp_properties"]
+            except Exception as e:
+                print("WARNING: Failed to load cal: %s" % (e, ))
                 return {}
-            if not os.path.exists(fn):
-                return {}
-            configj = readj(fn)
-            configs = configj["configs"]
-            if type(configs) is list:
-                raise ValueError(
-                    "Old style calibration, please update from list to dict")
-            config = configs["default"]
-            #if source and config["source"] != source:
-            #    raise ValueError("Source mismatches in config file")
-            assert "properties" in config
-            return config["properties"]
 
         # configs/ls-hvy-1/imager_calibration.j5
         microscopej = load_config(self.cal_fn_microscope())
@@ -299,18 +315,37 @@ class USCImager:
             microscopej[k] = v
         return microscopej
 
-    def cal_save_to_data(self, source, properties, mkdir=False):
+    def cal_save_to_data(self, source, disp_properties, mkdir=False):
         if mkdir and not os.path.exists(self.microscope.bc.get_data_dir()):
             os.mkdir(self.microscope.bc.get_data_dir())
         jout = {
             "configs": {
                 "default": {
                     "source": source,
-                    "properties": properties
+                    "disp_properties": disp_properties
                 }
             }
         }
         writej(self.cal_fn_data(), jout)
+
+    def native_pixel_pitch_um(self):
+        """
+        "pixel size" at max camera resolution
+        The number you find in the datasheet
+        Assumes square pixels
+        Only used for checking calibration
+        """
+        return self.j.get("native_pixel_pitch_um")
+
+    def hardware_resolution_scalar(self):
+        """
+        Scalar going from native pixel resolution to selected resolution
+        Ex: native 1000 wide, but selected 500 wide
+        Returns 0.5
+        """
+        native_w_pix, _native_h_pix = self.native_wh()
+        this_w_pix, _this_h_pix = self.raw_wh()
+        return this_w_pix / native_w_pix
 
 
 class USCMotion:
@@ -638,17 +673,19 @@ class USCOptics:
         self.j = j
         self.microscope = microscope
 
-    def image_wh_1x_mm(self):
+    def image_wh_raw_1x_mm(self):
         """
         1x "objective", not 1x magnification on sensor
         Relay, barlow, etc lens may significantly alter this from actual sensor size
+        No cropping applied
         """
         return self.j.get("image_width_1x_mm"), self.j.get(
             "image_height_1x_mm")
 
     def um_per_pixel_raw_1x(self):
         """
-        1x "objective", not 1x magnification on sensor
+        1x "objective", not 1x magnification on sensor at selected resolution
+        raw => non-scaled image at selected resolution
         Relay, barlow, etc lens may significantly alter this from actual pixel size
         """
         # Directly specified?
@@ -656,13 +693,10 @@ class USCOptics:
         if ret is not None:
             return ret
         # Fallback to calculating based on resolution
-        native_w_pix, _native_h_pix = self.microscope.usc.imager.native_wh()
         this_w_pix, _this_h_pix = self.microscope.usc.imager.raw_wh()
-        w_mm, _h_mm = self.image_wh_1x_mm()
-        # Less resolution => larger pixel
-        ratio = native_w_pix / this_w_pix
-        native_um_per_pixel_raw_1x = w_mm / native_w_pix * 1000
-        return native_um_per_pixel_raw_1x * ratio
+        w_mm, _h_mm = self.image_wh_raw_1x_mm()
+        w_um = w_mm * 1000
+        return w_um / this_w_pix
 
     def diffusion(self):
         """
@@ -720,7 +754,7 @@ class ObjectiveDB:
     def get(self, vendor, model):
         return self.db[(vendor.upper(), model.upper())]
 
-    def set_defaults(self, objectivejs):
+    def set_defaults_list(self, objectivejs):
         for objectivej in objectivejs:
             self.set_default(objectivej)
 
@@ -1169,11 +1203,12 @@ class BaseConfig:
         self.objective_db = ObjectiveDB()
         # self.joystick = JoystickConfig(jbc=self.j.get("joystick", {}))
 
-        self._enblend_cli = None
+        # self._enblend_cli = None
         self._enfuse_cli = None
         self._align_image_stack_cli = None
 
         self.init_dirs()
+        self.cache_constants()
 
     def init_dirs(self):
         self._data_dir = os.getenv("PYUSCOPE_DATA_DIR", "data")
@@ -1200,6 +1235,21 @@ class BaseConfig:
         self._script_data_dir = os.path.join(self.get_data_dir(), "script")
         if not os.path.exists(self._script_data_dir):
             os.mkdir(self._script_data_dir)
+
+    def cache_constants(self):
+        raw = self.j.get("timeout_scalar", "1.0")
+        if raw is None:
+            print("WARNING: timeouts are disabled. Software may lock up")
+            self._timeout_scalar = None
+        else:
+            self._timeout_scalar = float(raw)
+            if self._timeout_scalar <= 0:
+                raise ValueError(
+                    f"Invalid timouet scalar {self._timeout_scalar}")
+            if self._timeout_scalar < 1:
+                print(
+                    "WARNING: timeout scalar is below recommended value. Software may crash without cause"
+                )
 
     def get_data_dir(self):
         return self._data_dir
@@ -1253,11 +1303,23 @@ class BaseConfig:
     def labsmore_stitch_notification_email(self):
         return self.j.get("labsmore_stitch", {}).get("notification_email")
 
+    def labsmore_stitch_plausible(self):
+        return self.labsmore_stitch_aws_access_key(
+        ) and self.labsmore_stitch_aws_secret_key(
+        ) and self.labsmore_stitch_aws_id_key(
+        ) and self.labsmore_stitch_notification_email()
+
     def argus_stitch_cli(self):
         """
         Call given program with the scan output directory as the argument
         """
         return self.j.get("argus_stitch_cli", None)
+
+    def argus_cs_auto_path(self):
+        """
+        Override with a custom stitching program
+        """
+        return self.j.get("argus_cs_auto", "./utils/cs_auto.py")
 
     def dev_mode(self):
         """
@@ -1292,11 +1354,12 @@ class BaseConfig:
         Return True if they are configured correctly
         """
         ret = True
-        ret = ret and bool(self.enblend_cli())
+        # ret = ret and bool(self.enblend_cli())
         ret = ret and bool(self.enfuse_cli())
         ret = ret and bool(self.align_image_stack_cli())
         return ret
 
+    '''
     def enblend_cli(self):
         if self._enblend_cli:
             return self._enblend_cli
@@ -1304,6 +1367,7 @@ class BaseConfig:
                                                           {}), "enblend_cli",
                                                "enblend", "enblend")
         return self._enblend_cli
+    '''
 
     def enfuse_cli(self):
         """
@@ -1322,6 +1386,40 @@ class BaseConfig:
             self.j.get("panotools", {}), "align_image_stack_cli",
             "align_image_stack", "align_image_stack")
         return self._align_image_stack_cli
+
+    def timeout_scalar(self):
+        """
+        Sigh
+        https://github.com/Labsmore/pyuscope/issues/400
+        System is overheating / underpowered and sometimes failing real time requirements
+        """
+        return self._timeout_scalar
+
+    def timeout_scalar_scale(self, val):
+        if self._timeout_scalar:
+            return self._timeout_scalar * val
+        # Timeout disabled
+        else:
+            return None
+
+    def check_threads(self):
+        return os.getenv("PYUSCOPE_CHECK_THREADS",
+                         "N") == "Y" or self.dev_mode()
+
+    def stress_test(self):
+        """
+        Random sleeps, consume extra CPU, extra RAM
+        """
+        return bool(self.j.get("stress_test", False))
+
+    def profile(self):
+        """
+        Record memory / CPU utilization
+        """
+        return bool(self.j.get("profile", False))
+
+    def qr_regex(self):
+        return self.j.get("qr_regex", None)
 
 
 def get_bcj():

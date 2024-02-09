@@ -7,6 +7,7 @@ from uscope import config
 import json
 import json5
 from collections import OrderedDict
+from uscope.gui.input_widget import InputWidget
 
 from PyQt5 import Qt
 from PyQt5.QtGui import *
@@ -23,6 +24,134 @@ from uscope.gui.common import ArgusCommon, ArgusShutdown, error
 from uscope.gui.widgets import TopWidget, BatchImageTab, AdvancedTab, StitchingTab, MeasureTab
 from uscope.gui.imaging import MainTab, ImagerTab
 from uscope.gui.scripting import ScriptingTab
+
+
+# Can't save a dict like {(1, 2): "a"}
+def tupledict_to_json(j):
+    # {(1, 2): "a"} => [((1, 2), "a")]
+    return [(k, v) for k, v in j.items()]
+
+
+def json_to_tupledict(j):
+    # [((1, 2), "a")] => {(1, 2): "a"}
+    return dict([(tuple(k), v) for k, v in j])
+
+
+class ArgusOptionsWindow(QWidget):
+    def __init__(self, mw, parent=None):
+        super().__init__(parent=parent)
+        self.mw = mw
+        self.ac = self.mw.ac
+        # self.motion_damper = None
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        def motion_gb():
+            layout = QGridLayout()
+            row = 0
+
+            layout.addWidget(
+                QLabel("Motion damper (default 1.0 => full speed)"), row, 0)
+            self.motion_damper_le = QLineEdit("")
+            self.motion_damper_le.returnPressed.connect(
+                self.motion_damper_le_return)
+            layout.addWidget(self.motion_damper_le, row, 1)
+            row += 1
+
+            gb = QGroupBox("Motion")
+            gb.setLayout(layout)
+
+            return gb
+
+        def joystick_gb():
+            layout = QVBoxLayout()
+
+            self.joystick_iw = None
+            if self.ac.microscope.joystick is None:
+                layout.addWidget(QLabel("None"))
+            else:
+                self.joystick_iw = InputWidget(
+                    return_pressed=self.joystick_return)
+                iconfig = {}
+                joystick_config = self.ac.microscope.joystick.config.get_user_config(
+                )
+                for function_name, function_val in joystick_config.items():
+                    for k, v in function_val.items():
+                        label = "%s.%s (default %s)" % (function_name, k,
+                                                        v.get("default"))
+                        iconfig[label] = {
+                            "key": (function_name, k),
+                            # better to be none by default
+                            # "default": v.get("default"),
+                            "type": float,
+                            "empty_as_none": True,
+                            "widget": "QLineEdit",
+                        }
+                self.joystick_iw.configure(iconfig)
+                layout.addWidget(self.joystick_iw)
+
+            gb = QGroupBox("Joystick")
+            gb.setLayout(layout)
+
+            return gb
+
+        layout.addWidget(motion_gb())
+        layout.addWidget(joystick_gb())
+        self.setLayout(layout)
+
+    def motion_damper_le_return(self, lazy=False):
+        s = str(self.motion_damper_le.text()).strip()
+        if s:
+            try:
+                motion_damper = float(s)
+            except ValueError:
+                self.ac.log("Failed to parse motion damper scalar")
+                return
+            if motion_damper <= 0 or motion_damper > 1.0:
+                self.ac.log(
+                    f"Require motion damper 0 < {motion_damper} <= 1.0")
+                return
+        else:
+            if lazy:
+                return
+            motion_damper = 1.0
+        self.ac.log(f"Setting motion damper {motion_damper}")
+        self.ac.microscope.motion_ts().apply_damper(motion_damper)
+        # self.motion_damper = motion_damper
+
+    def joystick_return(self):
+        try:
+            value = self.joystick_iw.getValues()
+        except Exception as e:
+            self.ac.log(f"Failed to parse input value: {type(e)}, {e}")
+            return
+        # print("joystick value", value)
+        config = {}
+        for (function_name, k), v in value.items():
+            config.setdefault(function_name, {})[k] = v
+        # print("joystick config", config)
+        self.ac.microscope.joystick.config.set_user_config(config)
+
+    def cache_load(self, j):
+        j = j.get("main_window", {}).get("options", {})
+        self.motion_damper_le.setText(j.get("motion_damper", ""))
+        self.motion_damper_le_return(lazy=True)
+        if self.joystick_iw:
+            try:
+                saved_val = j.get("joystick_iw")
+                if saved_val:
+                    self.joystick_iw.setValues(json_to_tupledict(saved_val))
+            except Exception as e:
+                print("WARNING: failed to load joystick calibration", e)
+
+    def cache_save(self, j):
+        j = j.setdefault("main_window", {}).setdefault("options", {})
+        j["motion_damper"] = str(self.motion_damper_le.text())
+        if self.joystick_iw:
+            values = self.joystick_iw.getValues()
+            j["joystick_iw"] = tupledict_to_json(values)
 
 
 class FullscreenVideo(QWidget):
@@ -48,19 +177,21 @@ class MainWindow(AMainWindow):
         AMainWindow.__init__(self)
         # Homing may need attention in CLI
         # Make sure user sees that before UI
-        self.tabs = {}
         self.hide()
         self.verbose = verbose
         self.ac = ArgusCommon(microscope_name=microscope, mw=self)
         self.init_objects()
         self.ac.logs.append(self.mainTab.log)
         self.initUI()
-        # Load last GUI state
-        self.cache_load()
         # something causes this to pop back up
         # keep it hidden until we are homed since homing is still on CLI...
         self.hide()
         self.post_ui_init()
+
+        # Load last GUI state
+        # Must be done after post_ui_init() as may depend on threads being fully initialized
+        self.cache_load()
+
         self.show()
 
         # sometimes GUI maximization doesn't stick
@@ -77,6 +208,7 @@ class MainWindow(AMainWindow):
         self.displayAdvancedObjective.setChecked(
             j.get("display_advanced_objective", config.bc.dev_mode()))
         self.displayAdvancedObjectiveTriggered()
+        self.argus_options_window.cache_load(j)
 
     def _cache_save(self, j):
         j = j.setdefault("main_window", {})
@@ -85,10 +217,11 @@ class MainWindow(AMainWindow):
         )
         j["display_advanced_objective"] = self.displayAdvancedObjective.isChecked(
         )
+        self.argus_options_window.cache_save(j)
 
     def add_tab(self, cls, name):
         tab = cls(ac=self.ac, aname=name, parent=self)
-        self.tabs[name] = tab
+        self.ac.tabs[name] = tab
         return tab
 
     def init_objects(self):
@@ -106,6 +239,9 @@ class MainWindow(AMainWindow):
         self.ac.scriptingTab = self.scriptingTab
         self.ac.stitchingTab = self.stitchingTab
         self.ac.batchTab = self.batchTab
+        self.ac.advancedTab = self.advancedTab
+
+        self.argus_options_window = ArgusOptionsWindow(self)
 
     def createMenuBar(self):
         self.exitAction = QAction("Exit", self)
@@ -117,6 +253,16 @@ class MainWindow(AMainWindow):
         # File menu
         fileMenu = QMenu("File", self)
         menuBar.addMenu(fileMenu)
+        # Option
+        self.clearLog = QAction("Clear log", fileMenu)
+        fileMenu.addAction(self.clearLog)
+        self.clearLog.triggered.connect(self.clearLogTriggered)
+        # Extended options
+        self.displayArgusOptions = QAction("Advanced options", fileMenu)
+        fileMenu.addAction(self.displayArgusOptions)
+        self.displayArgusOptions.triggered.connect(
+            self.displayArgusOptionsTriggered)
+        # Exit
         fileMenu.addAction(self.exitAction)
 
         # Video menu
@@ -140,6 +286,11 @@ class MainWindow(AMainWindow):
         videoMenu.addAction(self.displayAdvancedObjective)
         self.displayAdvancedObjective.triggered.connect(
             self.displayAdvancedObjectiveTriggered)
+        self.enableRtspServer = QAction("RTSP Server", self, checkable=True)
+        if config.bc.dev_mode():
+            videoMenu.addAction(self.enableRtspServer)
+            self.enableRtspServer.triggered.connect(
+                self.enableRtspServerTriggered)
 
         motionMenu = menuBar.addMenu("Motion")
         # Some people prefer perspective of moving camera, some prefer moving stage
@@ -234,7 +385,7 @@ class MainWindow(AMainWindow):
             layout.addWidget(self.top_widget)
 
             self.tab_widget = QTabWidget()
-            for tab_name, tab in self.tabs.items():
+            for tab_name, tab in self.ac.tabs.items():
                 self.tab_widget.addTab(tab, tab_name)
             layout.addWidget(self.tab_widget)
 
@@ -253,11 +404,6 @@ class MainWindow(AMainWindow):
         pass
 
     def post_ui_init(self):
-        self.ac.log("pyuscope starting")
-        self.ac.log("https://github.com/Labsmore/pyuscope/")
-        self.ac.log("For enquiries contact support@labsmore.com")
-        self.ac.log("")
-
         # Start services
         # This will microscope.configure() which is needed by later tabs
         self.ac.post_ui_init()
@@ -306,9 +452,19 @@ class MainWindow(AMainWindow):
     def displayLimitsTriggered(self):
         self.ac.mainTab.show_minmax(bool(self.displayLimits.isChecked()))
 
+    def clearLogTriggered(self):
+        self.ac.mainTab.clear_log()
+
     def displayAdvancedMovementTriggered(self):
         self.ac.mainTab.motion_widget.show_advanced_movement(
             bool(self.displayAdvancedMovement.isChecked()))
+
+    def displayArgusOptionsTriggered(self):
+        self.argus_options_window.show()
+
+    def enableRtspServerTriggered(self):
+        self.ac.vidpip.enable_rtsp_server(
+            bool(self.enableRtspServer.isChecked()))
 
 
 def parse_args():

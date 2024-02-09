@@ -43,6 +43,26 @@ class StopEvent:
         self.microscope.stop_unregister(self.event)
 
 
+class MicroscopeStatistics:
+    def __init__(self, microscope):
+        self.microscope = microscope
+        self.getjs = []
+
+    def add_getj(self, callback):
+        self.getjs.append(callback)
+
+    def getj(self):
+        """
+        Return a JSON compatible object snapshotting all recorded statistics
+        Intended for profiling / error handling
+        This function should be thread safe
+        """
+        ret = {}
+        for callback in self.getjs:
+            callback(ret)
+        return ret
+
+
 class Microscope:
     def __init__(self, log=None, configure=True, hardware=True, **kwargs):
         self.bc = None
@@ -59,6 +79,8 @@ class Microscope:
         self.hardware = hardware
         self._last_cachej = None
         self.instruments = {}
+        # General purpose data that is passed to Planner and other things
+        self.calibration = {}
 
         if log is None:
             log = print
@@ -105,7 +127,7 @@ class Microscope:
         if serial:
             mconfig["serial"] = serial
         if not mconfig.get("name") or not mconfig.get("serial"):
-            self.default_microscope_config(mconfig)
+            self.default_microscope_config(mconfig, overwrite=False)
             print("using microscope auto config", mconfig)
         self.name = mconfig["name"]
         self._serial = mconfig.get("serial", None)
@@ -120,6 +142,8 @@ class Microscope:
             make_imager = False
             make_kinematics = False
             make_joystick = False
+
+        self.statistics = MicroscopeStatistics(self)
 
         if imager is None and imager_cli and make_imager:
             imager = gst.get_cli_imager_by_config(usc=self.usc,
@@ -151,18 +175,19 @@ class Microscope:
         """
         self.joystick = joystick
 
-    def default_microscope_config(self, mconfig={}):
+    def default_microscope_config(self, mconfig={}, overwrite=False):
         if not mconfig.get("name"):
             name = os.getenv("PYUSCOPE_MICROSCOPE")
             if name:
                 mconfig["name"] = name
 
+        # TODO: put mock flag in config file
         is_mock = mconfig.get("name") in ("mock", "mock-grbl")
         # TODO: if we want to revive touptek s/n here we could
         if not mconfig.get("name") or not mconfig.get(
                 "serial") and self.hardware and not is_mock:
             # Try to do aggressive GRBL auto-config
-            grbl_mconfig(mconfig)
+            grbl_mconfig(mconfig, overwrite=overwrite)
 
         # Default to mock GRBL
         if not mconfig.get("name"):
@@ -266,7 +291,13 @@ class Microscope:
     def model(self):
         """
         Return microscope model number
-        Same as the config file name
+        Currently the same as the config file name
+        """
+        return self.name
+
+    def config_name(self):
+        """
+        Return the config name
         """
         return self.name
 
@@ -279,6 +310,15 @@ class Microscope:
 
     def set_serial(self, serial):
         self._serial = serial
+
+    def model_serial_string(self):
+        """
+        Used for various config items
+        """
+        if self._serial:
+            return self.name + "_sn-" + self._serial
+        else:
+            return self.name
 
     """
     Argus hack bindings
@@ -349,6 +389,32 @@ class Microscope:
         for name, instrument in self.instruments.items():
             instrument.cache_load(instancesj.get(name, {}))
 
+    def cache_sn_save(self, cachej):
+        """
+        Argus hook to save configuration cache
+        In the future we might reverse such that we call argu
+        """
+        instrumentsj = cachej.setdefault("instruments", {})
+        # TODO: might have other config here (ex: paths)
+        instancesj = instrumentsj.setdefault("instances", {})
+        for name, instrument in self.instruments.items():
+            instancesj[name] = instrument.cache_sn_save()
+        self._last_cachej = cachej
+
+    def cache_sn_load(self, cachej):
+        """
+        Argus hook to load configurationcache
+        In the future we might reverse such that we call argu
+        """
+        self._last_cachej = cachej
+        self.calibration = cachej.get("calibration", {})
+
+        instrumentsj = cachej.get("instruments", {})
+        # TODO: might have other config here (ex: paths)
+        instancesj = instrumentsj.get("instances", {})
+        for name, instrument in self.instruments.items():
+            instrument.cache_sn_load(instancesj.get(name, {}))
+
 
 def get_cli_microscope(name=None):
     return Microscope(imager_cli=True, name=name)
@@ -358,7 +424,19 @@ def get_gui_microscope(name=None):
     return Microscope(imager_gui=True, name=name)
 
 
-def get_stitcher_microscope(mconfig=None):
+def get_mconfig(name=None, serial=None, mconfig=None):
+    if mconfig is None:
+        mconfig = {}
+    if name:
+        mconfig["name"] = name
+    if serial:
+        mconfig["serial"] = serial
+    return mconfig
+
+
+# used by stitcher
+# also used by get_microscope_info.py
+def get_virtual_microscope(mconfig=None):
     return Microscope(auto=False,
                       configure=False,
                       hardware=False,

@@ -1,15 +1,11 @@
-from uscope.config import PC
 from uscope.app.argus.threads import StitcherThread
-from uscope.planner.planner_util import microscope_to_planner_config
 from uscope import config
 from uscope.util import readj, writej
-import json
-import json5
 from collections import OrderedDict
 from uscope.cloud_stitch import CSInfo
 from uscope.imager.autofocus import AutoStacker
-import traceback
 from uscope.gui.common import ArgusShutdown
+from uscope.imager.imager_util import format_mm_3dec
 
 from PyQt5 import Qt
 from PyQt5.QtGui import *
@@ -21,6 +17,10 @@ import datetime
 import os.path
 import math
 from enum import Enum
+import copy
+import traceback
+import json
+import json5
 """
 Argus Widget
 """
@@ -33,7 +33,7 @@ class AMainWindow(QMainWindow):
         self.polli = 0
         self.ac = None
         self.shutting_down = False
-        self.cachej = None
+        self.cachej = {}
 
     def __del__(self):
         self.shutdown()
@@ -66,7 +66,10 @@ class AMainWindow(QMainWindow):
         for awidget in self.awidgets.values():
             awidget.post_ui_init()
 
-    def _shutdown(self):
+    def _shutdown_request(self):
+        pass
+
+    def _shutdown_join(self):
         pass
 
     def shutdown(self):
@@ -80,20 +83,34 @@ class AMainWindow(QMainWindow):
             self.fullscreen_widget.close()
 
         self.cache_save()
-        self._shutdown()
+        self._shutdown_request()
         for awidget in self.awidgets.values():
-            awidget.shutdown()
-        try:
-            if self.ac:
-                self.ac.shutdown()
-        except AttributeError:
-            pass
+            awidget.shutdown_request()
+        if self.ac:
+            self.ac.shutdown_request()
+        self._shutdown_join()
+        for awidget in self.awidgets.values():
+            awidget.shutdown_join()
+        if self.ac:
+            self.ac.shutdown_join()
 
     def closeEvent(self, event):
         self.shutdown()
 
     def _cache_save(self, cachej):
         pass
+
+    def _cache_sn_save(self, cachej):
+        pass
+
+    def cache_get_set_sn_entry(self, cachej):
+        ret = cachej.setdefault("microscopes", {}).setdefault(
+            self.ac.microscope.model_serial_string(), {})
+        if "model" not in ret:
+            ret["model"] = self.ac.microscope.model()
+        if "serial" not in ret:
+            ret["serial"] = self.ac.microscope.serial()
+        return ret
 
     def cache_save(self):
         """
@@ -102,20 +119,41 @@ class AMainWindow(QMainWindow):
         """
         if not self.ac:
             return
-        cachej = {}
+        # Recycle old value
+        # otherwise we can loose some config
+        # ex: carry over joystick config when not plugged in
+        cachej = self.cachej
+
+        # Full structure
         self.ac.microscope.cache_save(cachej)
         self._cache_save(cachej)
         for awidget in self.awidgets.values():
             awidget.cache_save(cachej)
+
+        # S/N specific
+        cachej_sn = self.cache_get_set_sn_entry(cachej)
+        self.ac.microscope.cache_sn_save(cachej_sn)
+        self._cache_sn_save(cachej_sn)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_save(cachej_sn)
+
         fn = self.ac.aconfig.cache_fn()
-        with open(fn, "w") as f:
+        # file getting corrupted on save
+        # https://github.com/Labsmore/pyuscope/issues/366
+        # Be absolutely sure we have a good file before saving
+        fn_tmp = fn + ".tmp"
+        with open(fn_tmp, "w") as f:
             json.dump(cachej,
                       f,
                       sort_keys=True,
                       indent=4,
                       separators=(",", ": "))
+        os.rename(fn_tmp, fn)
 
     def _cache_load(self, cachej):
+        pass
+
+    def _cache_sn_load(self, cachej):
         pass
 
     def cache_load(self):
@@ -126,12 +164,26 @@ class AMainWindow(QMainWindow):
         fn = self.ac.aconfig.cache_fn()
         cachej = {}
         if os.path.exists(fn):
-            with open(fn, "r") as f:
-                cachej = json5.load(f)
+            try:
+                with open(fn, "r") as f:
+                    cachej = json5.load(f)
+            except Exception as e:
+                print("Invalid configuration cache. Ignoring", e)
+
+        # Full
         self.ac.microscope.cache_load(cachej)
         self._cache_load(cachej)
         for awidget in self.awidgets.values():
             awidget.cache_load(cachej)
+
+        # S/N specific
+        cachej_sn = self.cache_get_set_sn_entry(cachej)
+        self.ac.microscope.cache_sn_load(cachej_sn)
+        self._cache_sn_load(cachej_sn)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_load(cachej_sn)
+
+        self.cachej = cachej
 
     def _poll_misc(self):
         pass
@@ -150,7 +202,7 @@ class AMainWindow(QMainWindow):
             self.ac.poll_misc()
         except ArgusShutdown:
             print(traceback.format_exc())
-            self.ac.shutdown()
+            self.shutdown()
             QCoreApplication.exit(1)
             return
 
@@ -212,16 +264,24 @@ class AWidget(QWidget):
         for awidget in self.awidgets.values():
             awidget.post_ui_init()
 
-    def _shutdown(self):
+    def _shutdown_request(self):
         pass
 
-    def shutdown(self):
+    def shutdown_request(self):
         """
         Called when GUI is shutting down
         """
-        self._shutdown()
+        self._shutdown_request()
         for awidget in self.awidgets.values():
-            awidget.shutdown()
+            awidget.shutdown_request()
+
+    def _shutdown_join(self):
+        pass
+
+    def shutdown_join(self):
+        self._shutdown_join()
+        for awidget in self.awidgets.values():
+            awidget.shutdown_join()
 
     def _cache_save(self, cachej):
         pass
@@ -246,6 +306,30 @@ class AWidget(QWidget):
         self._cache_load(cachej)
         for awidget in self.awidgets.values():
             awidget.cache_load(cachej)
+
+    def _cache_sn_save(self, cachej):
+        pass
+
+    def cache_sn_save(self, cachej):
+        """
+        Called when saving GUI state to file
+        Add your state to JSON object j
+        """
+        self._cache_sn_save(cachej)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_save(cachej)
+
+    def _cache_sn_load(self, cachej):
+        pass
+
+    def cache_sn_load(self, cachej):
+        """
+        Called when loading GUI state from file
+        Read your state from JSON object j
+        """
+        self._cache_sn_load(cachej)
+        for awidget in self.awidgets.values():
+            awidget.cache_sn_load(cachej)
 
     def _poll_misc(self):
         pass
@@ -615,11 +699,15 @@ class AdvancedTab(ArgusTab):
             1: 3,
             2: 9,
             3: 27,
+            4: 100,
+            5: 1000,
         }
         self.image_stabilization_cb.addItem("1 (off)")
         self.image_stabilization_cb.addItem("3")
         self.image_stabilization_cb.addItem("9")
         self.image_stabilization_cb.addItem("27")
+        self.image_stabilization_cb.addItem("100")
+        self.image_stabilization_cb.addItem("1000")
         layout.addWidget(self.image_stabilization_cb, row, 1)
         row += 1
 
@@ -630,49 +718,50 @@ class AdvancedTab(ArgusTab):
         # FIXME: display for now, but should make editable
         # Or maybe have it log a report instead of making widgets?
 
-        self.sysinfo_pb = QPushButton("System info")
-        self.sysinfo_pb.clicked.connect(self.log_system_info)
-        layout.addWidget(self.sysinfo_pb, row, 0)
+        self.diagnostic_info_pb = QPushButton("Diagnostic info (brief)")
+        self.diagnostic_info_pb.clicked.connect(self.diagnostic_info)
+        layout.addWidget(self.diagnostic_info_pb, row, 0)
+        row += 1
+
+        self.diagnostic_info_pb = QPushButton("Diagnostic info (verbose)")
+        self.diagnostic_info_pb.clicked.connect(self.diagnostic_info_verbose)
+        layout.addWidget(self.diagnostic_info_pb, row, 0)
         row += 1
 
         self.setLayout(layout)
 
-    def log_system_info(self):
-        """
-        TODO: make this generic Microscope status report
-        TODO: some of these we might want editable live for tuning
-        But for now lets just keep a simple report
-        """
-        self.ac.log("")
-        self.ac.log("System configuration / status")
-        self.ac.log("Kinematics")
-        self.ac.log("  tsettle_motion: %f" % self.ac.kinematics.tsettle_motion)
-        self.ac.log("  tsettle_hdr: %f" % self.ac.kinematics.tsettle_hdr)
-        self.ac.log("Image")
-        self.ac.log("  scalar: %f" % self.ac.usc.imager.scalar())
-        self.ac.log("Motion")
-        self.ac.log("  origin: %s" % self.ac.usc.motion.origin())
-        self.ac.log("  Backlash compensation")
-        self.ac.log("    Status: %s" %
-                    str(self.ac.usc.motion.backlash_compensation()))
-        backlashes = self.ac.usc.motion.backlash()
-        self.ac.log("    X: %s" % backlashes["x"])
-        self.ac.log("    Y: %s" % backlashes["y"])
-        if self.ac.microscope.has_z():
-            self.ac.log("    Z: %s" % backlashes["z"])
-        self.ac.log("Planner")
-        pconfig = microscope_to_planner_config(self.ac.usj,
-                                               objective={"x_view": None},
-                                               contour={})
-        pc = PC(j=pconfig)
-        self.ac.log("  Ideal overlap X: %f" % pc.ideal_overlap("x"))
-        self.ac.log("  Ideal overlap Y: %f" % pc.ideal_overlap("y"))
-        self.ac.log("  XY border: %f" % pc.border())
+    def diagnostic_info_verbose(self):
+        self.diagnostic_info(verbose=True)
 
-        # This is in another thread => print race conditions
-        # if we need more than one print we'll need to sequence these
-        # maybe offload the whole print to another thread
-        self.ac.motion_thread.log_info()
+    def diagnostic_info(self, verbose=False):
+        """
+        Some things take a while and/or need to be sequenced
+        Gather up all GUI state we can and pass off to another thread to actually print
+        """
+
+        self.ac.log("")
+        self.ac.log("")
+        self.ac.log("")
+        self.ac.log("Gathering diagnostic info")
+        # This has a lot of misc info
+        try:
+            scan_config = self.ac.mainTab.active_planner_widget(
+            ).get_current_scan_config()
+        except:
+            scan_config = {}
+            self.ac.log("Exception getting planner config")
+
+        imager_state = {}
+        imager_state["sn"] = self.ac.microscope.imager.get_sn()
+        imager_state["prop_cache"] = self.ac.control_scroll.get_prop_cache()
+
+        j = {
+            "argus_cachej": copy.deepcopy(self.ac.mw.cachej),
+            "scan_config": scan_config,
+            "imager_state": imager_state,
+            "verbose": verbose,
+        }
+        self.ac.task_thread.diagnostic_info(j)
 
     def update_pconfig_stack(self, pconfig):
         images_pm = int(str(self.stacker_number_le.text()))
@@ -701,6 +790,20 @@ class AdvancedTab(ArgusTab):
 
         if self.ac.microscope.has_z():
             self.update_pconfig_stack(pconfig)
+
+    def image_stacking_enabled(self):
+        images_pm = int(str(self.stacker_number_le.text()))
+        distance_pm = float(self.stacker_distance_le.text())
+        if not images_pm or distance_pm == 0.0:
+            return False
+        else:
+            return True
+
+    def image_stacking_pm_n(self):
+        return int(str(self.stacker_number_le.text()))
+
+    def image_stablization_enabled(self):
+        return self.get_image_stablization() > 1
 
     def _post_ui_init(self):
         if self.ac.microscope.has_z():
@@ -749,6 +852,7 @@ class AdvancedTab(ArgusTab):
         def setup_die_step(distance_mult, step_mult):
             stacker = AutoStacker(microscope=self.ac.microscope)
             objective_config = self.ac.objective_config()
+            assert objective_config
             params = stacker.calc_die_parameters(objective_config,
                                                  distance_mult, step_mult)
             self.stacker_distance_le.setText("%0.6f" % params["pm_distance"])
@@ -836,14 +940,26 @@ class StitchingTab(ArgusTab):
             layout.addWidget(self.stitch_email, row, 1)
             row += 1
 
-            layout.addWidget(QLabel("Manual stitch directory"), row, 0)
-            self.manual_stitch_dir = QLineEdit("")
-            layout.addWidget(self.manual_stitch_dir, row, 1)
-            row += 1
+            def manual_gb():
+                layout = QVBoxLayout()
 
-            self.cs_pb = QPushButton("Manual CloudStitch")
-            self.cs_pb.clicked.connect(self.stitch_begin_manual_cs)
-            layout.addWidget(self.cs_pb, row, 1)
+                self.stitch_browse_pb = QPushButton("Browse for directory")
+                self.stitch_browse_pb.clicked.connect(
+                    self.browse_for_stitch_dir)
+                layout.addWidget(self.stitch_browse_pb)
+
+                self.manual_stitch_dir = QLineEdit("")
+                layout.addWidget(self.manual_stitch_dir)
+
+                self.cs_pb = QPushButton("Run manual stitch")
+                self.cs_pb.clicked.connect(self.stitch_begin_manual_cs)
+                layout.addWidget(self.cs_pb)
+
+                gb = QGroupBox("Manual stitch")
+                gb.setLayout(layout)
+                return gb
+
+            layout.addWidget(manual_gb(), row, 0, 1, 2)
             row += 1
 
             gb = QGroupBox("Cloud Stitching")
@@ -860,10 +976,13 @@ class StitchingTab(ArgusTab):
         self.stitcher_thread.log_msg.connect(self.ac.log)
         self.stitcher_thread.start()
 
-    def _shutdown(self):
+    def _shutdown_request(self):
         if self.stitcher_thread:
-            self.stitcher_thread.shutdown()
-            self.stitcher_thread = None
+            self.stitcher_thread.shutdown_request()
+
+    def _shutdown_join(self):
+        if self.stitcher_thread:
+            self.stitcher_thread.shutdown_join()
 
     def stitch_begin_manual_cs(self):
         this_upload = str(self.manual_stitch_dir.text())
@@ -883,19 +1002,29 @@ class StitchingTab(ArgusTab):
             self.stitch_add(scan_config["out_dir"], scan_config=scan_config)
 
     def stitch_add(self, directory, scan_config=None):
-        self.ac.log(f"CloudStitch: requested {directory}")
+        self.ac.log(f"Stitch: requested {directory}")
         if not os.path.exists(directory):
             self.ac.log(
                 f"Aborting stitch: directory does not exist: {directory}")
             return
-        ipp = {}
         if scan_config is not None:
-            ipp = scan_config["pconfig"].get("ipp", {})
+            ippj = scan_config["pconfig"].get("ipp", {})
+        else:
+            ippj = {}
+            self.ac.mainTab.imaging_widget.update_ippj(ippj)
+
         # Offload uploads etc to thread since they might take a while
+        cs_info = None
+        if ippj["cloud_stitch"]:
+            cs_info = self.get_cs_info()
+            if not cs_info.is_plausible():
+                self.log(
+                    "ERROR: requested CloudStitch but don't have credentials")
+                return
         self.stitcher_thread.imagep_add(
             directory=directory,
-            cs_info=self.get_cs_info(),
-            ipp=ipp,
+            cs_info=cs_info,
+            ippj=ippj,
         )
 
     def get_cs_info(self):
@@ -903,6 +1032,19 @@ class StitchingTab(ArgusTab):
                       secret_key=str(self.stitch_secretkey.text()),
                       id_key=str(self.stitch_idkey.text()),
                       notification_email=str(self.stitch_email.text()))
+
+    def has_cs_info(self):
+        # called too early in initialization
+        # return self.get_cs_info().is_plausible()
+        return self.ac.bc.labsmore_stitch_plausible()
+
+    def browse_for_stitch_dir(self):
+        filename = QFileDialog.getExistingDirectory(
+            None, "Select directory", self.ac.microscope.bc.get_scan_dir(),
+            QFileDialog.ShowDirsOnly)
+        if not filename:
+            return
+        self.manual_stitch_dir.setText(filename)
 
 
 class JoystickListener(QPushButton):
@@ -1134,6 +1276,10 @@ class TopMotionWidget(AWidget):
 
         self.keys_up = {}
 
+    def statistics_getj(self, statj):
+        j = statj.setdefault("argus", {})
+        j["keyboard_slow_jogs"] = self.jog_controller.slow_jogs
+
     # Used to invert XY for user preference
     def set_kj_xy_scalar(self, val):
         self.kj_xy_scalar = val
@@ -1159,6 +1305,7 @@ class TopMotionWidget(AWidget):
     def _post_ui_init(self):
         # self.max_velocities = self.ac.motion_thread.motion.get_max_velocities()
         self.jog_controller = self.ac.motion_thread.get_jog_controller(0.2)
+        self.ac.microscope.statistics.add_getj(self.statistics_getj)
 
     def update_slider_cache(self):
         if self.fine_move:
@@ -1447,9 +1594,10 @@ class AnnotateImage(QLabel):
             else:
                 # Move right
                 dx += 10
+            distance_um = self.pixel_conversion * distance
+            text = format_mm_3dec(distance_um / 1000)
             qp.drawText((start.x() + end.x()) // 2 + dx,
-                        (start.y() + end.y()) // 2 + dy,
-                        "%0.2f µm" % (self.pixel_conversion * distance, ))
+                        (start.y() + end.y()) // 2 + dy, text)
 
         selected_color = QColor(43, 250, 43, 200)
         default_color = QColor(43, 43, 43, 200)
