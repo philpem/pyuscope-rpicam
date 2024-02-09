@@ -963,9 +963,6 @@ class Picam2ControlScroll(ImagerControlScroll):
         self.log("> get_exposure_disp_property")
         return "ExposureTime"
 
-
-    # FIXME: There's a bit of gstreamer cruft below here which needs tidying up
-
     def template_property(self, prop_entry):
         prop_name = prop_entry["prop_name"]
 
