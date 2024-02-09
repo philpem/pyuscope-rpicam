@@ -748,50 +748,69 @@ class Picam2ControlScroll(ImagerControlScroll):
 
     def __init__(self, picam2, ac, parent=None):
         groups = OrderedDict([
-            ("HSV+", [
+            ("Toggles", [
                 {
+                    # Value is retrieved using raw_prop_read and set with raw_prop_write.
                     "prop_name": "AeEnable",
                     "disp_name": "Auto exposure",
-                    "type": "bool"
+                    "type": "bool",
                 },
                 {
                     "prop_name": "AwbEnable",
                     "disp_name": "Auto white balance",
-                    "type": "bool"
+                    "type": "bool",
                 },
             ]),
-        ])
-
-        """
+            ("Exposure", [
                 {
-                    "prop_name": "ColourGains_R",
-                    "disp_name": "Red",
+                    "prop_name": "ExposureTime",
+                    "disp_name": "Exposure time",
+
+                    # FIXME: We should pull min/max/default from the camera controls settings, but they seem to be garbage.
+                    #    F.ex.: min 60, max zero, default None?!
+                    #"min": picam2.camera_controls['ExposureTime'][0],
+                    #"max": picam2.camera_controls['ExposureTime'][1],
+                    #"default": picam2.camera_controls['ExposureTime'][2],
                     "min": 0,
-                    "max": 320
+                    "max": 60000,
+                    "default": 45000,
+
+                    "gui_driven": False,
                 },
                 {
                     "prop_name": "AnalogueGain",
-                    "disp_name": "Green",
-                    "min": picam2.camera_controls['AnalogueGain'][0],
-                    "max": picam2.camera_controls['AnalogueGain'][1],
-                    "default": picam2.camera_controls['AnalogueGain'][2],
+                    "disp_name": "Analog gain (x10)",
+                    # FIXME: The min/max changes depending on the mode the camera is in, TODO deal with this (somehow)
+                    "min":      int(picam2.camera_controls['AnalogueGain'][0] * 10.0),
+                    "max":      int(picam2.camera_controls['AnalogueGain'][1] * 10.0),
+                    "default":  10,
+                    "gui_driven": False,
+                },
+            ]),
+            ("Colour balance", [
+                {
+                    "prop_name": "ColourGains_R",
+                    "disp_name": "Red gain (x10)",
+                    "min": 0,
+                    "max": 320,
+                    "gui_driven": False,
                 },
                 {
                     "prop_name": "ColourGains_B",
-                    "disp_name": "Blue",
+                    "disp_name": "Blue gain (x10)",
                     "min": 0,
                     "max": 320,
+                    "gui_driven": False,
                 },
                 {
-                    "prop_name": "ExposureTime",
-                    "disp_name": "Exp",
-                    "min": picam2.camera_controls['ExposureTime'][0],
-                    "max": picam2.camera_controls['ExposureTime'][1],
-                    "default": picam2.camera_controls['ExposureTime'][2],
-                },
+                    "prop_name": "ColourTemperature",
+                    "disp_name": "Colour temperature",
+                    "min": 1000,
+                    "max": 10000,
+                    "gui_driven": False,
+                }
             ]),
         ])
-        """
 
         ImagerControlScroll.__init__(self,
                                     groups=self.flatten_groups(groups),
@@ -801,44 +820,111 @@ class Picam2ControlScroll(ImagerControlScroll):
         self.log = ac.log
         self.metadata = None
         
-        # Force some defaults in
+        # Load some reasonable default camera settings
         from libcamera import controls
-        self.picam2.set_controls({
-            "AwbMode": controls.AwbModeEnum.Tungsten
-        })
+        self._camera_controls = {
+            "AeEnable": True,
+            # "AeConstraintMode": xxx,
+            # "AeMeteringMode": xxx,
+            "AwbEnable": True,
+            "AwbMode": controls.AwbModeEnum.Tungsten,
+            "ColourGains": [16.0, 16.0],
+        }
+        self.picam2.set_controls(self._camera_controls)
+
+        # Intercept the metadata from the preview widget using the title function update callback
+        def title_fn(metadata):
+            self.metadata = metadata
+            if not True:
+                self.log()
+                self.log("PiCam2 New Metadata =>")
+                for k in ('ExposureTime', 'AnalogueGain', 'DigitalGain', 'ColourTemperature', 'ColourGains'):
+                    self.log(f"   {k:17}: {metadata[k]}")
+                # self.log(f"   RawMetadata => {metadata}")
+                self.log("PiCam2 New ControlState =>")
+                for k in ('ExposureTime', 'AnalogueGain'):
+                    self.log(f"   {k:17}: min {picam2.camera_controls[k][0]} max {picam2.camera_controls[k][1]} default {picam2.camera_controls[k][2]}")
+                self.log()
+
+            # FIXME: This is a bit of a hack. The update timer should update the GUI controls, but it doesn't...
+            self.update_by_reading()
+            return "Picamera2 preview"
+        ac.vidpip.preview_widget.title_function = title_fn
 
         layout = QVBoxLayout()
         layout.addLayout(self.buttonLayout())
 
-    def raw_prop_write(self, name, val):
-        self.log(f"RawPropWrite {name} => {val}")
-        self.picam2.set_controls({name: val})
-        pass
+    def _raw_prop_write(self, name, val):
+        self.log(f"PiCam2ICS._RawPropWrite {name} => {val}")
 
-    def raw_prop_read(self, name):
-        # Trying to read the camera metadata is a blocking operation.
-        #self.log(f"RawPropRead '{name}'")
-        return 0
-        """
-        if self.metadata is None:
-            # capture_metadata contains most of the settings
-            metadata = self.picam2.capture_metadata()
-            self.metadata = metadata
+        # The colour and analogue gains require special handling as they're scaled by 10x
+        # The colour gains are also packed into a tuple (we use a list) for Pycamera2
+        if name == "AnalogueGain":
+            self._camera_controls["AnalogueGain"] = float(val) / 10.0
+        if name == "ColourGains_R":
+            self._camera_controls["ColourGains"][0] = float(val) / 10.0
+        elif name == "ColourGains_B":
+            self._camera_controls["ColourGains"][1] = float(val) / 10.0
         else:
-            metadata = self.metadata
-        """
+            self._camera_controls[name] = val
 
-        #val = self.metadata.get(name, None)
-        #self.log(f"Metadata read '{name}' gets {val}")
+        # If AE is on, don't try to override analogue gain and exposure time
+        if self._camera_controls['AeEnable']:
+            for k in ('AnalogueGain', 'ExposureTime'):
+                if k in self._camera_controls:
+                    del self._camera_controls[k]
+
+        # If AWB is on, don't try to override the R/B colour gains or colour temperature
+        if self._camera_controls['AwbEnable']:
+            for k in ('ColourGains', 'ColourTemperature'):
+                if k in self._camera_controls:
+                    del self._camera_controls[k]
+
+        # TODO: If colour temperature changed, don't try to override ColourGains
+            
+        # TODO: If ColourGains changed, don't try to override colour temperature
+
+        # Push the new camera controls to Picamera2
+        self.picam2.set_controls(self._camera_controls)
+
+    # TODO FIXME: ColourGains and AnalogueGain are floats, should be scaled by 10x and converted to/from int when passed to/from the GUI
+    def _raw_prop_read(self, name):
+        #self.log(f"PiCam2ICS._RawPropRead '{name}'")
+        
+        # We cache the metadata (using the preview widget's title_function)
+        # because using `picam2.capture_metadata()` will block until the next
+        # frame arrives. That's not a great thing to do on every property
+        # read.
+
+        # TODO: Create a local dict.
+        #       Fill it with _camera_controls
+        #       Overwrite it with self.metadata
+        #       Use it to read the property status
+        # Should make the code tidier
+
+        if self.metadata is not None:
+            # Analogue gain is scaled 10x as it's a float and Pyuscope can only deal with ints
+            if name == 'AnalogueGain':
+                return int(self.metadata['AnalogueGain'] * 10.0)
+
+            # Colour gains for R and B are stored in a tuple and need to be handled differently
+            # There is no colour gain for B, that's the exposure setting...
+            if name == 'ColourGains_R':
+                return int(self.metadata['ColourGains'][0] * 10.0)
+            if name == 'ColourGains_B':
+                return int(self.metadata['ColourGains'][1] * 10.0)
+
+            # Metadata present, see if we have this property
+            if name in self.metadata:
+                return self.metadata[name]
+
+        # Check if this is a camera control (AE enable, AWB enable, ...)
+        if name in self._camera_controls:
+            return self._camera_controls[name]
+
+        # If we land here, we're in trouble...
+        self.log(f"PiCam2ICS: !!! Unknown RawPropRead '{name} !!!")
         return 0
-
-        # Colour gains for R and G are stored in a tuple and need to be handled differently
-        if name == 'ColourGains_R':
-            return metadata['ColourGains'][0]
-        if name == 'ColourGains_B':
-            return metadata['ColourGains'][1]
-        else:
-            return metadata[name]
 
     """
     def raw_prop_default(self, name):
@@ -847,26 +933,29 @@ class Picam2ControlScroll(ImagerControlScroll):
     """
 
     def auto_exposure_enabled(self):
-        #return bool(self.disp_prop_read("AeEnable"))
-        return True
+        self.log("> auto_exposure_enabled")
+        return bool(self.disp_prop_read("AeEnable"))
 
     def auto_color_enabled(self):
-        #return bool(self.disp_prop_read("AwbEnable"))
-        return True
+        self.log("> auto_color_enabled")
+        return bool(self.disp_prop_read("AwbEnable"))
 
     def set_exposure(self, n):
+        self.log("> set_exposure = {n}")
         #self.prop_write("ExposureTime", n)
         pass
 
     def get_exposure(self):
+        self.log("> get_exposure")
         #return self.disp_prop_read("ExposureTime")
         return 0
 
     def get_exposure_disp_property(self):
+        self.log("> get_exposure_disp_property")
         return "ExposureTime"
 
     def disp_prop_was_rw(self, name, value):
-        # print("disp prop rw", name, value)
+        self.log(f"> disp_prop_was_rw {name} => {value}")
         # Auto-exposure quickly fights with GUI
         # Disable the control when its activated
         if name == "AeEnable":
@@ -875,6 +964,7 @@ class Picam2ControlScroll(ImagerControlScroll):
         if name == "AwbEnable":
             self.set_gui_driven(not value, disp_names=["ColourGains_R", "AnalogueGain", "ColourGains_B"])
 
+    # FIXME: There's a bit of gstreamer cruft below here which needs tidying up
 
     def template_property(self, prop_entry):
         prop_name = prop_entry["prop_name"]
@@ -898,6 +988,6 @@ class Picam2ControlScroll(ImagerControlScroll):
                 val = self.template_property(propk)
                 propdict[val["prop_name"]] = val
             groups[group_name] = propdict
-        print("groups", groups)
-        # import sys; sys.exit(1)
+        from pprint import pprint; print("Flattened group list:"); pprint(groups, indent=2)
+        #import sys; sys.exit(1)
         return groups
