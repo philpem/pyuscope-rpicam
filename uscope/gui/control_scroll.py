@@ -803,8 +803,9 @@ class Picam2ControlScroll(ImagerControlScroll):
                     "gui_driven": False,
                 },
                 {
+                    # This is the colour temperature (estimated by AWB), and is read-only
                     "prop_name": "ColourTemperature",
-                    "disp_name": "Colour temperature",
+                    "disp_name": "Colour temperature (Kelvin, AWB-estimated)",
                     "min": 1000,
                     "max": 10000,
                     "gui_driven": False,
@@ -855,34 +856,40 @@ class Picam2ControlScroll(ImagerControlScroll):
         layout.addLayout(self.buttonLayout())
 
     def _raw_prop_write(self, name, val):
-        self.log(f"PiCam2ICS._RawPropWrite {name} => {val}")
+        # self.log(f"PiCam2ICS._RawPropWrite {name} => {val}")
+
+        # Don't allow read-only parameters to be written
+        if name in ('ColourCorrectionMatrix',
+                    'ColourTemperature',
+                    'DigitalGain',
+                    'FrameDuration',
+                    'HdrChannel',
+                    'lux',
+                    'SensorTimestamp'):
+            return
 
         # The colour and analogue gains require special handling as they're scaled by 10x
-        # The colour gains are also packed into a tuple (we use a list) for Pycamera2
         if name == "AnalogueGain":
             self._camera_controls["AnalogueGain"] = float(val) / 10.0
-        if name == "ColourGains_R":
+
+        # Pycamera2 also wants the colour gains to be packed into a tuple, but a list is fine
+        elif name == "ColourGains_R":
             self._camera_controls["ColourGains"][0] = float(val) / 10.0
         elif name == "ColourGains_B":
             self._camera_controls["ColourGains"][1] = float(val) / 10.0
         else:
             self._camera_controls[name] = val
 
-        # If AE is on, don't try to override analogue gain and exposure time
+        # If AE is on, don't try to override analogue gain or exposure time
         if self._camera_controls['AeEnable']:
             for k in ('AnalogueGain', 'ExposureTime'):
                 if k in self._camera_controls:
                     del self._camera_controls[k]
 
-        # If AWB is on, don't try to override the R/B colour gains or colour temperature
+        # If AWB is on, don't try to override the R/B colour gains
         if self._camera_controls['AwbEnable']:
-            for k in ('ColourGains', 'ColourTemperature'):
-                if k in self._camera_controls:
-                    del self._camera_controls[k]
-
-        # TODO: If colour temperature changed, don't try to override ColourGains
-            
-        # TODO: If ColourGains changed, don't try to override colour temperature
+            if 'ColourGains' in self._camera_controls:
+                del self._camera_controls['ColourGains']
 
         # Push the new camera controls to Picamera2
         self.picam2.set_controls(self._camera_controls)
@@ -894,9 +901,8 @@ class Picam2ControlScroll(ImagerControlScroll):
 
         # Auto-white-balance fights with GUI: disable manual colour controls if it's on
         if name == "AwbEnable":
-            self.set_gui_driven(not val, disp_names=["Red gain (x10)", "Blue gain (x10)", "Colour temperature"])
+            self.set_gui_driven(not val, disp_names=["Red gain (x10)", "Blue gain (x10)"])
 
-    # TODO FIXME: ColourGains and AnalogueGain are floats, should be scaled by 10x and converted to/from int when passed to/from the GUI
     def _raw_prop_read(self, name):
         #self.log(f"PiCam2ICS._RawPropRead '{name}'")
         
