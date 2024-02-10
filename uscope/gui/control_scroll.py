@@ -883,10 +883,15 @@ class Picam2ControlScroll(ImagerControlScroll):
             self._camera_controls["AnalogueGain"] = float(val) / PICAM_GAIN_SCALING
 
         # Pycamera2 also wants the colour gains to be packed into a tuple, but a list is fine
-        elif name == "ColourGains_R":
-            self._camera_controls["ColourGains"][0] = float(val) / PICAM_GAIN_SCALING
-        elif name == "ColourGains_B":
-            self._camera_controls["ColourGains"][1] = float(val) / PICAM_GAIN_SCALING
+        elif name in ("ColourGains_R", "ColourGains_B"):
+            # pull the colour gains in from metadata if we don't know them
+            if "ColourGains" not in self._camera_controls:
+                self._camera_controls["ColourGains"] = self.metadata["ColourGains"]
+
+            if name == "ColourGains_R":
+                self._camera_controls["ColourGains"][0] = float(val) / PICAM_GAIN_SCALING
+            elif name == "ColourGains_B":
+                self._camera_controls["ColourGains"][1] = float(val) / PICAM_GAIN_SCALING
         else:
             self._camera_controls[name] = val
 
@@ -959,20 +964,20 @@ class Picam2ControlScroll(ImagerControlScroll):
 
     def auto_exposure_enabled(self):
         self.log("> auto_exposure_enabled")
-        return bool(self.disp_prop_read("AeEnable"))
+        return bool(self.raw_prop_read("AeEnable"))
 
     def auto_color_enabled(self):
         self.log("> auto_color_enabled")
-        return bool(self.disp_prop_read("AwbEnable"))
+        return bool(self.raw_prop_read("AwbEnable"))
 
     def set_exposure(self, n):
         self.log("> set_exposure = {n}")
-        #self.prop_write("ExposureTime", n)
+        self.raw_prop_write("ExposureTime", n)
         pass
 
     def get_exposure(self):
         self.log("> get_exposure")
-        #return self.disp_prop_read("ExposureTime")
+        return self.raw_prop_read("ExposureTime")
         return 0
 
     def get_exposure_disp_property(self):
