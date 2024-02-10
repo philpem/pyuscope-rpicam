@@ -741,6 +741,9 @@ class GstControlScroll(ImagerControlScroll):
         return ps.default_value
     """
 
+# Scaling factor for gain controls
+PICAM_GAIN_SCALING = 100.0
+
 class Picam2ControlScroll(ImagerControlScroll):
     """
     Display a number of picam2 controls and supply knobs to tweak them
@@ -779,27 +782,27 @@ class Picam2ControlScroll(ImagerControlScroll):
                 },
                 {
                     "prop_name": "AnalogueGain",
-                    "disp_name": "Analog gain (x10)",
+                    "disp_name": "Analog gain",
                     # FIXME: The min/max changes depending on the mode the camera is in, TODO deal with this (somehow). For now, min 1x, max 32x.
-                    "min":      10,  # int(picam2.camera_controls['AnalogueGain'][0] * 10.0),
-                    "max":      320, # int(picam2.camera_controls['AnalogueGain'][1] * 10.0),
-                    "default":  10,
+                    "min":      int(1.0  * PICAM_GAIN_SCALING),  # int(picam2.camera_controls['AnalogueGain'][0] * 10.0),
+                    "max":      int(32.0 * PICAM_GAIN_SCALING),  # int(picam2.camera_controls['AnalogueGain'][1] * 10.0),
+                    "default":  int(1.0  * PICAM_GAIN_SCALING),
                     "gui_driven": False,
                 },
             ]),
             ("Colour balance", [
                 {
                     "prop_name": "ColourGains_R",
-                    "disp_name": "Red gain (x10)",
-                    "min": 0,
-                    "max": 320,
+                    "disp_name": "Red gain",
+                    "min": int(0.0 * PICAM_GAIN_SCALING),
+                    "max": int(32.0 * PICAM_GAIN_SCALING),
                     "gui_driven": False,
                 },
                 {
                     "prop_name": "ColourGains_B",
-                    "disp_name": "Blue gain (x10)",
-                    "min": 0,
-                    "max": 320,
+                    "disp_name": "Blue gain",
+                    "min": int(0.0 * PICAM_GAIN_SCALING),
+                    "max": int(32.0 * PICAM_GAIN_SCALING),
                     "gui_driven": False,
                 },
                 {
@@ -832,7 +835,7 @@ class Picam2ControlScroll(ImagerControlScroll):
             # "AeMeteringMode": xxx,
             "AwbEnable": True,
             "AwbMode": controls.AwbModeEnum.Tungsten,
-            "ColourGains": [16.0, 16.0],
+            "ColourGains": [1.0, 1.0],
         }
         self.picam2.set_controls(self._camera_controls)
 
@@ -877,13 +880,13 @@ class Picam2ControlScroll(ImagerControlScroll):
 
         # The colour and analogue gains require special handling as they're scaled by 10x
         if name == "AnalogueGain":
-            self._camera_controls["AnalogueGain"] = float(val) / 10.0
+            self._camera_controls["AnalogueGain"] = float(val) / PICAM_GAIN_SCALING
 
         # Pycamera2 also wants the colour gains to be packed into a tuple, but a list is fine
         elif name == "ColourGains_R":
-            self._camera_controls["ColourGains"][0] = float(val) / 10.0
+            self._camera_controls["ColourGains"][0] = float(val) / PICAM_GAIN_SCALING
         elif name == "ColourGains_B":
-            self._camera_controls["ColourGains"][1] = float(val) / 10.0
+            self._camera_controls["ColourGains"][1] = float(val) / PICAM_GAIN_SCALING
         else:
             self._camera_controls[name] = val
 
@@ -904,11 +907,11 @@ class Picam2ControlScroll(ImagerControlScroll):
         # Auto-exposure fights with GUI: disable manual exposure controls if it's on
         if name == "AeEnable":
             self.set_gui_driven(not val,
-                                disp_names=["Exposure time", "Analog gain (x10)"])
+                                disp_names=["Exposure time", "Analog gain"])
 
         # Auto-white-balance fights with GUI: disable manual colour controls if it's on
         if name == "AwbEnable":
-            self.set_gui_driven(not val, disp_names=["Red gain (x10)", "Blue gain (x10)"])
+            self.set_gui_driven(not val, disp_names=["Red gain", "Blue gain"])
 
     def _raw_prop_read(self, name):
         #self.log(f"PiCam2ICS._RawPropRead '{name}'")
@@ -927,14 +930,14 @@ class Picam2ControlScroll(ImagerControlScroll):
         if self.metadata is not None:
             # Analogue gain is scaled 10x as it's a float and Pyuscope can only deal with ints
             if name == 'AnalogueGain':
-                return int(self.metadata['AnalogueGain'] * 10.0)
+                return int(self.metadata['AnalogueGain'] * PICAM_GAIN_SCALING)
 
             # Colour gains for R and B are stored in a tuple and need to be handled differently
             # There is no colour gain for B, that's the exposure setting...
             if name == 'ColourGains_R':
-                return int(self.metadata['ColourGains'][0] * 10.0)
+                return int(self.metadata['ColourGains'][0] * PICAM_GAIN_SCALING)
             if name == 'ColourGains_B':
-                return int(self.metadata['ColourGains'][1] * 10.0)
+                return int(self.metadata['ColourGains'][1] * PICAM_GAIN_SCALING)
 
             # Metadata present, see if we have this property
             if name in self.metadata:
