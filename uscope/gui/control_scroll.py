@@ -805,9 +805,12 @@ class Picam2ControlScroll(ImagerControlScroll):
                 {
                     # This is the colour temperature (estimated by AWB), and is read-only
                     "prop_name": "ColourTemperature",
-                    "disp_name": "Colour temperature (Kelvin, AWB-estimated)",
+                    "disp_name": "Colour temperature (Kelvin, estimated by AWB)",
                     "min": 1000,
                     "max": 10000,
+
+                    # FIXME: For some reason this doesn't work and a hacky fix was added below (search for ColourTempFix)
+                    "ro": True,
                     "gui_driven": False,
                 }
             ]),
@@ -857,6 +860,10 @@ class Picam2ControlScroll(ImagerControlScroll):
 
     def _raw_prop_write(self, name, val):
         # self.log(f"PiCam2ICS._RawPropWrite {name} => {val}")
+
+        # Disable read-only indicators
+        # FIXME (ColourTempFix): Figure out why this is necessary, gui_driven (in the 'group' OrderedDict) should have done this
+        self.set_gui_driven(False, disp_names=['Colour temperature (Kelvin, estimated by AWB)'])
 
         # Don't allow read-only parameters to be written
         if name in ('ColourCorrectionMatrix',
