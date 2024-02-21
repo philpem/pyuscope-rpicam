@@ -825,7 +825,10 @@ class Picam2ControlScroll(ImagerControlScroll):
                                     parent=parent)
         self.picam2 = picam2
         self.log = ac.log
-        self.metadata = None
+        self.metadata = {
+            'AnalogueGain': 1.0,
+            'ColourGains': (1.0, 1.0)
+        }
         
         # Load some reasonable default camera settings
         from libcamera import controls
@@ -926,31 +929,23 @@ class Picam2ControlScroll(ImagerControlScroll):
         # frame arrives. That's not a great thing to do on every property
         # read.
 
-        # TODO: Create a local dict.
-        #       Fill it with _camera_controls
-        #       Overwrite it with self.metadata
-        #       Use it to read the property status
-        # Should make the code tidier
+        # Merge the metadata and active settings
+        active_settings = {**self._camera_controls, **self.metadata}
 
-        if self.metadata is not None:
-            # Analogue gain is scaled 10x as it's a float and Pyuscope can only deal with ints
-            if name == 'AnalogueGain':
-                return int(self.metadata['AnalogueGain'] * PICAM_GAIN_SCALING)
+        # Scale float parameters as Pyuscope can only deal with ints
+        if name in ('AnalogueGain'):
+            return int(active_settings[name] * PICAM_GAIN_SCALING)
 
-            # Colour gains for R and B are stored in a tuple and need to be handled differently
-            # There is no colour gain for B, that's the exposure setting...
-            if name == 'ColourGains_R':
-                return int(self.metadata['ColourGains'][0] * PICAM_GAIN_SCALING)
-            if name == 'ColourGains_B':
-                return int(self.metadata['ColourGains'][1] * PICAM_GAIN_SCALING)
+        # Colour gains for R and B are stored in a tuple and need to be handled differently
+        # There is no colour gain for B, that's the exposure setting...
+        if name == 'ColourGains_R':
+            return int(active_settings['ColourGains'][0] * PICAM_GAIN_SCALING)
+        if name == 'ColourGains_B':
+            return int(active_settings['ColourGains'][1] * PICAM_GAIN_SCALING)
 
-            # Metadata present, see if we have this property
-            if name in self.metadata:
-                return self.metadata[name]
-
-        # Check if this is a camera control (AE enable, AWB enable, ...)
-        if name in self._camera_controls:
-            return self._camera_controls[name]
+        # Property doesn't need special handling, just return it
+        if name in active_settings:
+            return active_settings[name]
 
         # If we land here, we're in trouble...
         self.log(f"PiCam2ICS: !!! Unknown RawPropRead '{name} !!!")
