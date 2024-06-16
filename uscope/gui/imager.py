@@ -241,6 +241,7 @@ class Picam2GUIImager(Imager):
             options["image"] = image
             options["scale_factor"] = self.ac.usc.imager.scalar()
             options["scale_expected_wh"] = self.ac.usc.imager.final_wh()
+            options["objective_config"] = self.ac.objective_config()
             if self.ac.usc.imager.videoflip_method():
                 options[
                     "videoflip_method"] = self.ac.usc.imager.videoflip_method(
