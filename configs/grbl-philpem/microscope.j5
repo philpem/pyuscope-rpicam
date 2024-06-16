@@ -9,16 +9,24 @@ A minimal configuration to do basic testing
         },
         "backlash": {
             // X has a square coupler with lots of lovely backlash
-            "x": 0.040,
+            // raw: 0.045
+            "x": 1.290,
             
             // Y has a spline coupler with less backlash
-            "y": 0.024,
+            // raw: 0.024
+            "y": 0.050,
 
-            // Z is direct drive - TODO, work out the backlash in the BH2
-            "z": 0.000,
+            // Z is direct drive with almost no backlash
+            // raw: 0.005
+            "z": 0.025,
         },
-        // I think this enables backlash compensation; it's either -1 or null.
-        "backlash_compensation": -1,
+        /* 
+         * from config.py:
+         *   +1: move negative along axis then positive to final position
+         *   0 => none
+         *   -1: move positive along axis then negative to final position
+         */
+        "backlash_compensation": 1,
     },
     "imager": {
         "source":"picam2src",
