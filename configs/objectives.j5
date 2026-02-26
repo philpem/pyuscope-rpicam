@@ -374,6 +374,15 @@ In practice these are mechanically compatible
         },
         {
             "vendor": "Olympus",
+            "model": "ULWD MSPlan 50X",
+            "series": "MSPlan",
+            "magnification": 50,
+            "na": 0.55,
+            "thread": "RMS",
+            "infinity_tube_length": 180,
+        },
+        {
+            "vendor": "Olympus",
             "model": "MSPlan 100X",
             "series": "MSPlan",
             "magnification": 100,
